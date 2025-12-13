@@ -1,5 +1,9 @@
 # meta-container-deploy
 
+<p align="center">
+  <img src="docs/cover.png" alt="meta-container-deploy" width="600">
+</p>
+
 Yocto/OpenEmbedded layer for declarative Podman container support with build-time image pulling and systemd Quadlet integration.
 
 ## Overview
