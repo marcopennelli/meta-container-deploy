@@ -160,9 +160,36 @@ Ensure meta-virtualization is also included.
 
 ## Quick Start
 
-### Option 1: Using BitBake Classes
+This layer provides **4 methods** to include containers in your Yocto image:
 
-Create a recipe that inherits the container classes:
+| Method | Best For | Configuration Location |
+|--------|----------|----------------------|
+| 1. Direct Recipe | Static, versioned container recipes | `.bb` recipe files |
+| 2. local.conf Variables | Dynamic provisioning (e.g., Fucinas) | `local.conf` |
+| 3. Manifest-Based | Standalone projects, config versioning | `containers.yaml` |
+| 4. Packagegroup | Grouping multiple container recipes | Packagegroup recipe |
+
+### Prerequisites
+
+Add to your `local.conf` to enable systemd (required for Quadlet):
+
+```bitbake
+DISTRO_FEATURES:append = " systemd usrmerge virtualization"
+DISTRO_FEATURES_BACKFILL_CONSIDERED:append = " sysvinit"
+VIRTUAL-RUNTIME_init_manager = "systemd"
+VIRTUAL-RUNTIME_initscripts = "systemd-compat-units"
+
+# Required for container networking (iptables/netfilter modules)
+IMAGE_INSTALL:append = " kernel-modules"
+```
+
+---
+
+### Method 1: Direct Recipe Approach (Traditional)
+
+Create individual `.bb` recipe files that inherit the container classes.
+
+**Create a recipe:**
 
 ```bitbake
 # recipes-containers/webserver/nginx-server.bb
@@ -178,17 +205,69 @@ CONTAINER_PORTS = "8080:80"
 CONTAINER_RESTART = "always"
 ```
 
-Add to your image:
+**Add to your image:**
 
 ```bitbake
 IMAGE_INSTALL:append = " nginx-server packagegroup-container-support"
 ```
 
-### Option 2: Using a Container Manifest
+**Build and run:**
 
-Create a `containers.yaml` manifest:
+```bash
+bitbake core-image-minimal
+# Boot the image, then:
+systemctl status nginx-server
+curl localhost:8080
+```
+
+---
+
+### Method 2: local.conf Variable-Based
+
+Configure containers entirely in `local.conf` without creating recipe files. Ideal for dynamic provisioning systems like Fucinas that generate `local.conf` at build time.
+
+**Add to `local.conf`:**
+
+```bitbake
+# List of containers to deploy
+CONTAINERS = "mqtt-broker nginx-proxy"
+
+# MQTT broker configuration
+CONTAINER_mqtt_broker_IMAGE = "docker.io/eclipse-mosquitto:2.0"
+CONTAINER_mqtt_broker_PORTS = "1883:1883 9001:9001"
+CONTAINER_mqtt_broker_VOLUMES = "/data/mosquitto:/mosquitto/data:rw"
+CONTAINER_mqtt_broker_RESTART = "always"
+
+# Nginx proxy configuration
+CONTAINER_nginx_proxy_IMAGE = "docker.io/library/nginx:alpine"
+CONTAINER_nginx_proxy_PORTS = "80:80 443:443"
+CONTAINER_nginx_proxy_DEPENDS_ON = "mqtt-broker"
+
+# Add to image
+IMAGE_INSTALL:append = " packagegroup-containers-localconf"
+```
+
+**Note:** Container names with `-` or `.` are converted to `_` in variable names (e.g., `mqtt-broker` becomes `CONTAINER_mqtt_broker_*`).
+
+**Build and run:**
+
+```bash
+bitbake core-image-minimal
+# Boot the image, then:
+systemctl status mqtt-broker
+systemctl status nginx-proxy
+```
+
+---
+
+### Method 3: Manifest-Based
+
+Define containers in a YAML or JSON manifest file. Ideal for standalone Yocto projects where container configuration should be version-controlled separately.
+
+**Create `containers.yaml`:**
 
 ```yaml
+# containers.yaml
 containers:
   - name: mqtt-broker
     image: docker.io/eclipse-mosquitto:2.0
@@ -198,6 +277,7 @@ containers:
     volumes:
       - "/data/mosquitto:/mosquitto/data:rw"
     restart_policy: always
+    enabled: true
 
   - name: node-red
     image: docker.io/nodered/node-red:latest
@@ -209,14 +289,59 @@ containers:
       - mqtt-broker
     environment:
       TZ: "UTC"
+    restart_policy: always
 ```
 
-Reference in your build:
+**Add to `local.conf`:**
 
 ```bitbake
-# In local.conf or image recipe
-CONTAINER_MANIFEST = "${TOPDIR}/../containers.yaml"
+# Path to manifest file
+CONTAINER_MANIFEST = "${TOPDIR}/conf/containers.yaml"
+
+# Add to image
+IMAGE_INSTALL:append = " packagegroup-containers-manifest"
 ```
+
+**Build and run:**
+
+```bash
+bitbake core-image-minimal
+# Boot the image, then:
+systemctl status mqtt-broker
+systemctl status node-red
+```
+
+---
+
+### Method 4: Packagegroup Approach
+
+Create a packagegroup that depends on multiple container recipes. Useful for organizing related containers into logical groups.
+
+**Create a packagegroup recipe:**
+
+```bitbake
+# recipes-containers/packagegroups/packagegroup-iot-containers.bb
+SUMMARY = "IoT container stack"
+LICENSE = "MIT"
+LIC_FILES_CHKSUM = "file://${COMMON_LICENSE_DIR}/MIT;md5=0835ade698e0bcf8506ecda2f7b4f302"
+
+inherit packagegroup
+
+RDEPENDS:${PN} = "\
+    packagegroup-container-support \
+    mqtt-broker \
+    node-red \
+    grafana \
+"
+```
+
+**Add to your image:**
+
+```bitbake
+IMAGE_INSTALL:append = " packagegroup-iot-containers"
+```
+
+This method requires the individual container recipes (mqtt-broker, node-red, grafana) to exist as Method 1 recipes.
 
 ## BitBake Classes
 
@@ -262,9 +387,28 @@ Generates Podman Quadlet .container files for systemd integration.
 | `CONTAINER_CPU_LIMIT` | CPU limit (e.g., 0.5) | - |
 | `CONTAINER_ENABLED` | Set to "0" to disable | `1` |
 
+### container-localconf.bbclass
+
+Enables container configuration via `local.conf` variables (Method 2). Used by `packagegroup-containers-localconf`.
+
+**Variables:**
+| Variable | Description |
+|----------|-------------|
+| `CONTAINERS` | Space-separated list of container names to deploy |
+| `CONTAINER_<name>_IMAGE` | Container image reference (required) |
+| `CONTAINER_<name>_PORTS` | Space-separated port mappings |
+| `CONTAINER_<name>_VOLUMES` | Space-separated volume mounts |
+| `CONTAINER_<name>_ENVIRONMENT` | Space-separated KEY=value pairs |
+| `CONTAINER_<name>_NETWORK` | Network mode: host, bridge, none |
+| `CONTAINER_<name>_RESTART` | Restart policy (default: always) |
+| `CONTAINER_<name>_DEPENDS_ON` | Space-separated container dependencies |
+| `CONTAINER_<name>_*` | All other container-quadlet variables |
+
+**Note:** Replace `-` and `.` in container names with `_` for variable names.
+
 ### container-manifest.bbclass
 
-Parses YAML/JSON container manifests for dynamic recipe generation.
+Parses YAML/JSON container manifests for dynamic recipe generation (Method 3). Used by `packagegroup-containers-manifest`.
 
 **Variables:**
 | Variable | Description |
@@ -321,6 +465,26 @@ Meta-package that pulls in all required container runtime dependencies:
 - podman
 - skopeo
 - container-import
+
+### packagegroup-containers-localconf
+
+Entry point for Method 2 (local.conf variable-based). Add this to `IMAGE_INSTALL` along with `CONTAINERS` and `CONTAINER_*` variables in `local.conf`.
+
+### packagegroup-containers-manifest
+
+Entry point for Method 3 (manifest-based). Add this to `IMAGE_INSTALL` along with `CONTAINER_MANIFEST` variable pointing to your `containers.yaml` file.
+
+### containers-localconf
+
+Worker recipe that pulls container images and generates Quadlet files based on `local.conf` variables. Used internally by `packagegroup-containers-localconf`.
+
+### containers-manifest
+
+Worker recipe that parses the manifest file and deploys containers. Used internally by `packagegroup-containers-manifest`.
+
+### test-container
+
+Example container recipe (Method 1) deploying nginx:alpine for layer validation.
 
 ## Architecture
 
