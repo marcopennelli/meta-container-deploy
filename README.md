@@ -165,7 +165,7 @@ This layer provides **4 methods** to include containers in your Yocto image:
 | Method | Best For | Configuration Location |
 |--------|----------|----------------------|
 | 1. Direct Recipe | Static, versioned container recipes | `.bb` recipe files |
-| 2. local.conf Variables | Dynamic provisioning (e.g., Fucinas) | `local.conf` |
+| 2. local.conf Variables | Dynamic provisioning, CI/CD pipelines | `local.conf` |
 | 3. Manifest-Based | Standalone projects, config versioning | `containers.yaml` |
 | 4. Packagegroup | Grouping multiple container recipes | Packagegroup recipe |
 
@@ -224,7 +224,7 @@ curl localhost:8080
 
 ### Method 2: local.conf Variable-Based
 
-Configure containers entirely in `local.conf` without creating recipe files. Ideal for dynamic provisioning systems like Fucinas that generate `local.conf` at build time.
+Configure containers entirely in `local.conf` without creating recipe files. Ideal for CI/CD pipelines and dynamic provisioning systems that generate `local.conf` at build time.
 
 **Add to `local.conf`:**
 
