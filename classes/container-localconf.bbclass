@@ -44,12 +44,37 @@
 #   COMMAND - Command arguments
 #   PULL_POLICY - Pull policy: always, missing, never (default: missing)
 #   DIGEST - Pin to specific digest for reproducibility
+#   POD - Pod name to join (container becomes a pod member)
+#
+# Pod configuration (PODS variable + POD_<name>_<VAR>):
+#   PODS - Space-separated list of pod names to create
+#   POD_<name>_PORTS - Port mappings for the pod
+#   POD_<name>_NETWORK - Network mode for the pod
+#   POD_<name>_VOLUMES - Shared volumes for pod containers
+#   POD_<name>_LABELS - Labels for the pod
+#   POD_<name>_DNS - DNS servers for the pod
+#   POD_<name>_HOSTNAME - Hostname for the pod
+#   POD_<name>_ENABLED - Set to "0" to disable pod auto-start
+#
+# Example with pods:
+#   PODS = "myapp"
+#   POD_myapp_PORTS = "8080:8080 8081:8081"
+#   POD_myapp_NETWORK = "bridge"
+#
+#   CONTAINERS = "myapp-backend myapp-frontend"
+#   CONTAINER_myapp_backend_IMAGE = "myregistry/backend:v1"
+#   CONTAINER_myapp_backend_POD = "myapp"
+#   CONTAINER_myapp_frontend_IMAGE = "myregistry/frontend:v1"
+#   CONTAINER_myapp_frontend_POD = "myapp"
 #
 # Copyright (c) 2025 Marco Pennelli <marco.pennelli@technosec.net>
 # SPDX-License-Identifier: MIT
 
 # List of containers to configure
 CONTAINERS ?= ""
+
+# List of pods to configure
+PODS ?= ""
 
 # Include base dependencies
 DEPENDS += "skopeo-native"
@@ -96,23 +121,44 @@ def get_container_list(d):
     containers = d.getVar('CONTAINERS') or ''
     return [c.strip() for c in containers.split() if c.strip()]
 
-# All container configuration variable suffixes
-CONTAINER_VAR_SUFFIXES = "IMAGE PORTS VOLUMES ENVIRONMENT NETWORK RESTART USER WORKING_DIR DEVICES CAPS_ADD CAPS_DROP PRIVILEGED READ_ONLY MEMORY_LIMIT CPU_LIMIT ENABLED LABELS DEPENDS_ON ENTRYPOINT COMMAND PULL_POLICY DIGEST AUTH_FILE SECURITY_OPTS"
+def get_pod_list(d):
+    """Get the list of pod names from PODS variable."""
+    pods = d.getVar('PODS') or ''
+    return [p.strip() for p in pods.split() if p.strip()]
 
-# Validate container configuration at parse time and set up vardeps
+def get_pod_var(d, pod_name, var_name, default=''):
+    """Get a pod-specific variable with fallback to default."""
+    # Sanitize pod name for BitBake variable (replace - with _)
+    safe_name = pod_name.replace('-', '_').replace('.', '_')
+    var = d.getVar('POD_%s_%s' % (safe_name, var_name))
+    if var:
+        return var
+    # Also try with original name (in case user used original format)
+    var = d.getVar('POD_%s_%s' % (pod_name, var_name))
+    return var if var else default
+
+# All container configuration variable suffixes
+CONTAINER_VAR_SUFFIXES = "IMAGE PORTS VOLUMES ENVIRONMENT NETWORK RESTART USER WORKING_DIR DEVICES CAPS_ADD CAPS_DROP PRIVILEGED READ_ONLY MEMORY_LIMIT CPU_LIMIT ENABLED LABELS DEPENDS_ON ENTRYPOINT COMMAND PULL_POLICY DIGEST AUTH_FILE SECURITY_OPTS POD"
+
+# All pod configuration variable suffixes
+POD_VAR_SUFFIXES = "PORTS NETWORK VOLUMES LABELS DNS DNS_SEARCH HOSTNAME IP MAC ADD_HOST USERNS ENABLED"
+
+# Validate container and pod configuration at parse time and set up vardeps
 python __anonymous() {
     containers = get_container_list(d)
-    if not containers:
+    pods = get_pod_list(d)
+
+    if not containers and not pods:
         return
 
     # Build list of all container variables for vardeps
     var_suffixes = (d.getVar('CONTAINER_VAR_SUFFIXES') or '').split()
-    all_container_vars = ['CONTAINERS']
+    all_vars = ['CONTAINERS', 'PODS']
 
     for container_name in containers:
         safe_name = container_name.replace('-', '_').replace('.', '_')
         for suffix in var_suffixes:
-            all_container_vars.append(f'CONTAINER_{safe_name}_{suffix}')
+            all_vars.append(f'CONTAINER_{safe_name}_{suffix}')
 
         image = get_container_var(d, container_name, 'IMAGE')
         if not image:
@@ -133,13 +179,42 @@ python __anonymous() {
         if get_container_var(d, container_name, 'NETWORK') == 'host':
             bb.warn("Container '%s' uses host networking - network isolation disabled" % container_name)
 
-    # Set vardeps for tasks that depend on container configuration
-    vardeps_str = ' '.join(all_container_vars)
+        # Warn if pod member defines ports
+        pod = get_container_var(d, container_name, 'POD')
+        ports = get_container_var(d, container_name, 'PORTS')
+        if pod and ports:
+            bb.warn("Container '%s' is a pod member but defines CONTAINER_%s_PORTS. "
+                    "Ports should be defined on the pod, not individual containers." %
+                    (container_name, container_name.replace('-', '_')))
+
+        # Validate pod reference exists
+        if pod and pods and pod not in pods:
+            bb.warn("Container '%s' references pod '%s' which is not in PODS list" %
+                    (container_name, pod))
+
+    # Build list of all pod variables for vardeps
+    pod_var_suffixes = (d.getVar('POD_VAR_SUFFIXES') or '').split()
+
+    for pod_name in pods:
+        safe_name = pod_name.replace('-', '_').replace('.', '_')
+        for suffix in pod_var_suffixes:
+            all_vars.append(f'POD_{safe_name}_{suffix}')
+
+        # Security warnings for pods
+        if get_pod_var(d, pod_name, 'NETWORK') == 'host':
+            bb.warn("Pod '%s' uses host networking - network isolation disabled" % pod_name)
+
+    # Set vardeps for tasks that depend on container/pod configuration
+    vardeps_str = ' '.join(all_vars)
     d.appendVarFlag('do_generate_quadlets', 'vardeps', ' ' + vardeps_str)
+    d.appendVarFlag('do_generate_pods', 'vardeps', ' ' + vardeps_str)
     d.appendVarFlag('do_generate_import_scripts', 'vardeps', ' ' + vardeps_str)
     d.appendVarFlag('do_pull_containers', 'vardeps', ' ' + vardeps_str)
 
-    bb.note("Configured %d containers from local.conf: %s" % (len(containers), ', '.join(containers)))
+    if containers:
+        bb.note("Configured %d containers from local.conf: %s" % (len(containers), ', '.join(containers)))
+    if pods:
+        bb.note("Configured %d pods from local.conf: %s" % (len(pods), ', '.join(pods)))
 }
 
 # Pull all container images using skopeo-native
@@ -238,6 +313,11 @@ python do_generate_quadlets() {
         # [Container] section
         lines.append("[Container]")
         lines.append("Image=" + image)
+
+        # Pod membership
+        pod = get_container_var(d, container_name, 'POD')
+        if pod:
+            lines.append("Pod=" + pod + ".pod")
 
         # Entrypoint and command
         entrypoint = get_container_var(d, container_name, 'ENTRYPOINT')
@@ -362,6 +442,119 @@ python do_generate_quadlets() {
 
 addtask do_generate_quadlets after do_configure before do_compile
 
+# Generate Quadlet .pod files for all pods
+python do_generate_pods() {
+    import os
+
+    pods = get_pod_list(d)
+    if not pods:
+        return
+
+    workdir = d.getVar('WORKDIR')
+
+    for pod_name in pods:
+        # Build Quadlet pod file content
+        lines = []
+
+        # [Unit] section
+        lines.append("# Podman Quadlet pod file for " + pod_name)
+        lines.append("# Auto-generated by meta-container-deploy (container-localconf)")
+        lines.append("")
+        lines.append("[Unit]")
+        lines.append("Description=" + pod_name + " pod")
+        lines.append("After=network-online.target container-import.service")
+        lines.append("Wants=network-online.target")
+        lines.append("")
+
+        # [Pod] section
+        lines.append("[Pod]")
+        lines.append("PodName=" + pod_name)
+
+        # Port mappings (pods handle ports, not individual containers)
+        ports = get_pod_var(d, pod_name, 'PORTS')
+        if ports:
+            for port in ports.split():
+                lines.append("PublishPort=" + port)
+
+        # Network mode
+        network = get_pod_var(d, pod_name, 'NETWORK')
+        if network:
+            lines.append("Network=" + network)
+
+        # Volume mounts (shared by all containers in pod)
+        volumes = get_pod_var(d, pod_name, 'VOLUMES')
+        if volumes:
+            for volume in volumes.split():
+                lines.append("Volume=" + volume)
+
+        # Labels
+        labels = get_pod_var(d, pod_name, 'LABELS')
+        if labels:
+            for label in labels.split():
+                if '=' in label:
+                    lines.append("Label=" + label)
+
+        # DNS configuration
+        dns = get_pod_var(d, pod_name, 'DNS')
+        if dns:
+            for server in dns.split():
+                lines.append("DNS=" + server)
+
+        dns_search = get_pod_var(d, pod_name, 'DNS_SEARCH')
+        if dns_search:
+            for domain in dns_search.split():
+                lines.append("DNSSearch=" + domain)
+
+        # Hostname
+        hostname = get_pod_var(d, pod_name, 'HOSTNAME')
+        if hostname:
+            lines.append("Hostname=" + hostname)
+
+        # Static IP/MAC
+        ip = get_pod_var(d, pod_name, 'IP')
+        if ip:
+            lines.append("IP=" + ip)
+
+        mac = get_pod_var(d, pod_name, 'MAC')
+        if mac:
+            lines.append("MAC=" + mac)
+
+        # Host mappings for /etc/hosts
+        add_host = get_pod_var(d, pod_name, 'ADD_HOST')
+        if add_host:
+            for mapping in add_host.split():
+                lines.append("AddHost=" + mapping)
+
+        # User namespace
+        userns = get_pod_var(d, pod_name, 'USERNS')
+        if userns:
+            lines.append("Userns=" + userns)
+
+        lines.append("")
+
+        # [Install] section
+        lines.append("[Install]")
+        enabled = get_pod_var(d, pod_name, 'ENABLED', '1')
+        if enabled != '0':
+            lines.append("WantedBy=multi-user.target")
+        else:
+            lines.append("# Pod disabled - uncomment to enable")
+            lines.append("# WantedBy=multi-user.target")
+
+        # Write the Quadlet pod file
+        quadlet_dir = os.path.join(workdir, 'quadlets')
+        os.makedirs(quadlet_dir, exist_ok=True)
+        pod_file = os.path.join(quadlet_dir, pod_name + ".pod")
+
+        with open(pod_file, 'w') as f:
+            f.write('\n'.join(lines))
+            f.write('\n')
+
+        bb.note("Generated Quadlet pod file for '%s': %s" % (pod_name, pod_file))
+}
+
+addtask do_generate_pods after do_configure before do_compile
+
 # Generate import scripts for all containers
 python do_generate_import_scripts() {
     import os
@@ -460,15 +653,27 @@ do_install:append() {
         fi
     done
 
+    # Install pod Quadlet files
+    for POD_NAME in ${PODS}; do
+        if [ -f "${WORKDIR}/quadlets/${POD_NAME}.pod" ]; then
+            install -d ${D}${QUADLET_DIR}
+            install -m 0644 ${WORKDIR}/quadlets/${POD_NAME}.pod \
+                ${D}${QUADLET_DIR}/
+
+            bbnote "Installed Quadlet pod file for: ${POD_NAME}"
+        fi
+    done
+
     # Create import marker directory
     install -d ${D}${CONTAINER_IMPORT_MARKER_DIR}
 }
 
-# Set FILES to include all container artifacts
-# Using wildcards since containers are determined at parse time
+# Set FILES to include all container and pod artifacts
+# Using wildcards since containers/pods are determined at parse time
 FILES:${PN} += "\
     ${CONTAINER_PRELOAD_DIR}/* \
     ${QUADLET_DIR}/*.container \
+    ${QUADLET_DIR}/*.pod \
     ${sysconfdir}/containers/import.d/*.sh \
     ${CONTAINER_IMPORT_MARKER_DIR} \
 "
