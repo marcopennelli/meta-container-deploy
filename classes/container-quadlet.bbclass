@@ -33,6 +33,12 @@
 #   CONTAINER_MEMORY_LIMIT - Memory limit (e.g., 512m, 1g)
 #   CONTAINER_CPU_LIMIT - CPU limit (e.g., 0.5, 2)
 #   CONTAINER_ENABLED - Set to "0" to disable auto-start (default: 1)
+#   CONTAINER_POD - Pod name to join (generates Pod=<name>.pod directive)
+#
+# Pod membership:
+#   When CONTAINER_POD is set, the container becomes a member of the specified pod.
+#   Pod members should NOT define CONTAINER_PORTS - ports are managed by the pod.
+#   Pod members communicate via localhost within the shared network namespace.
 #
 # Copyright (c) 2025 Marco Pennelli <marco.pennelli@technosec.net>
 # SPDX-License-Identifier: MIT
@@ -64,6 +70,7 @@ CONTAINER_LABELS ?= ""
 CONTAINER_MEMORY_LIMIT ?= ""
 CONTAINER_CPU_LIMIT ?= ""
 CONTAINER_ENABLED ?= "1"
+CONTAINER_POD ?= ""
 
 # Quadlet installation directory
 QUADLET_DIR = "${sysconfdir}/containers/systemd"
@@ -91,6 +98,13 @@ python do_validate_quadlet() {
 
     if d.getVar('CONTAINER_NETWORK') == 'host':
         bb.warn("Container '%s' uses host networking - network isolation disabled" % container_name)
+
+    # Warn if pod member defines ports (pods should handle ports)
+    pod = d.getVar('CONTAINER_POD')
+    ports = d.getVar('CONTAINER_PORTS')
+    if pod and ports:
+        bb.warn("Container '%s' is a pod member but defines CONTAINER_PORTS. "
+                "Ports should be defined on the pod, not individual containers." % container_name)
 }
 addtask validate_quadlet before do_compile
 
@@ -125,6 +139,11 @@ python do_generate_quadlet() {
     # [Container] section
     lines.append("[Container]")
     lines.append("Image=" + container_image)
+
+    # Pod membership
+    pod = d.getVar('CONTAINER_POD')
+    if pod:
+        lines.append("Pod=" + pod + ".pod")
 
     # Entrypoint and command
     entrypoint = d.getVar('CONTAINER_ENTRYPOINT')

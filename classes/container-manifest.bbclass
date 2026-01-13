@@ -71,6 +71,34 @@
 #   pull_policy           - Pull policy: always, missing, never (default: missing)
 #   digest                - Pin to specific image digest for reproducibility
 #   registry.auth_secret  - Path to registry auth file
+#   pod                   - Pod name to join (makes container a pod member)
+#
+# Pod manifest format:
+#   pods:
+#     - name: myapp
+#       ports:
+#         - "8080:8080"
+#         - "8081:8081"
+#       network: bridge
+#       volumes:
+#         - "/data:/app/data:rw"
+#       hostname: myapp-pod
+#       enabled: true
+#
+# Pod configuration options:
+#   name (required)       - Pod name (used for service/file naming)
+#   ports                 - List of port mappings (centralized for all containers)
+#   network               - Network mode: host, bridge, none, or custom name
+#   volumes               - List of volume mounts shared by all containers
+#   labels                - Dict or list of pod labels
+#   dns                   - List of DNS server addresses
+#   dns_search            - List of DNS search domains
+#   hostname              - Hostname for the pod
+#   ip                    - Static IP address for the pod
+#   mac                   - Static MAC address for the pod
+#   add_host              - List of host:ip mappings for /etc/hosts
+#   userns                - User namespace mode
+#   enabled               - Boolean to enable/disable auto-start (default: true)
 #
 # Copyright (c) 2025 Marco Pennelli <marco.pennelli@technosec.net>
 # SPDX-License-Identifier: MIT
@@ -118,8 +146,16 @@ def get_container_list_from_manifest(d):
     manifest_path = d.getVar('CONTAINER_MANIFEST')
     if not manifest_path:
         return []
-    containers = parse_container_manifest(manifest_path, d)
+    containers, _ = parse_container_manifest(manifest_path, d)
     return [c.get('name', '') for c in containers if c.get('name')]
+
+def get_pod_list_from_manifest(d):
+    """Get list of pod names from parsed manifest."""
+    manifest_path = d.getVar('CONTAINER_MANIFEST')
+    if not manifest_path:
+        return []
+    _, pods = parse_container_manifest(manifest_path, d)
+    return [p.get('name', '') for p in pods if p.get('name')]
 
 # Python function to parse manifest and validate at parse time
 python __anonymous() {
@@ -135,7 +171,11 @@ python __anonymous() {
 
     # Parse the manifest
     try:
-        containers = parse_container_manifest(manifest_path, d)
+        containers, pods = parse_container_manifest(manifest_path, d)
+
+        # Get pod names for validation
+        pod_names = [p.get('name', '') for p in pods if p.get('name')]
+
         if containers:
             # Store parsed containers for later use
             d.setVar('CONTAINER_MANIFEST_PARSED', str(containers))
@@ -168,14 +208,47 @@ python __anonymous() {
                 if container.get('network') == 'host':
                     bb.warn("Container '%s' uses host networking - network isolation disabled" % name)
 
+                # Warn if pod member defines ports
+                pod = container.get('pod', '')
+                ports = container.get('ports', [])
+                if pod and ports:
+                    bb.warn("Container '%s' is a pod member but defines 'ports'. "
+                            "Ports should be defined on the pod, not individual containers." % name)
+
+                # Validate pod reference exists
+                if pod and pod_names and pod not in pod_names:
+                    bb.warn("Container '%s' references pod '%s' which is not defined in manifest" %
+                            (name, pod))
+
             bb.note("Parsed and validated %d containers from manifest: %s" %
                     (len(containers), ', '.join(container_names)))
+
+        if pods:
+            # Store parsed pods for later use
+            d.setVar('POD_MANIFEST_PARSED', str(pods))
+
+            # Store pod names for shell tasks
+            d.setVar('PODS_FROM_MANIFEST', ' '.join(pod_names))
+
+            # Validate each pod
+            for pod in pods:
+                name = pod.get('name', '')
+                if not name:
+                    bb.fatal("Pod in manifest is missing 'name' field")
+
+                # Security warnings
+                if pod.get('network') == 'host':
+                    bb.warn("Pod '%s' uses host networking - network isolation disabled" % name)
+
+            bb.note("Parsed and validated %d pods from manifest: %s" %
+                    (len(pods), ', '.join(pod_names)))
+
     except Exception as e:
         bb.fatal("Failed to parse container manifest: %s" % str(e))
 }
 
 def parse_container_manifest(manifest_path, d):
-    """Parse a YAML or JSON container manifest file."""
+    """Parse a YAML or JSON container manifest file. Returns (containers, pods) tuple."""
     import json
 
     with open(manifest_path, 'r') as f:
@@ -195,12 +268,21 @@ def parse_container_manifest(manifest_path, d):
             bb.fatal("Invalid YAML in manifest: %s" % str(e))
 
     if not isinstance(data, dict):
-        bb.fatal("Container manifest must be a dictionary with 'containers' key")
+        bb.fatal("Container manifest must be a dictionary with 'containers' and/or 'pods' key")
 
     containers = data.get('containers', [])
     if not isinstance(containers, list):
         bb.fatal("'containers' must be a list in the manifest")
 
+    pods = data.get('pods', [])
+    if not isinstance(pods, list):
+        bb.fatal("'pods' must be a list in the manifest")
+
+    return containers, pods
+
+def parse_container_manifest_containers_only(manifest_path, d):
+    """Legacy wrapper that returns only containers for backward compatibility."""
+    containers, _ = parse_container_manifest(manifest_path, d)
     return containers
 
 def container_to_bitbake_vars(container, d):
@@ -315,7 +397,7 @@ python do_pull_containers() {
         bb.note("No container manifest configured")
         return
 
-    containers = parse_container_manifest(manifest_path, d)
+    containers, _ = parse_container_manifest(manifest_path, d)
     if not containers:
         bb.note("No containers found in manifest")
         return
@@ -379,7 +461,7 @@ python do_generate_quadlets() {
     if not manifest_path:
         return
 
-    containers = parse_container_manifest(manifest_path, d)
+    containers, _ = parse_container_manifest(manifest_path, d)
     if not containers:
         return
 
@@ -413,6 +495,11 @@ python do_generate_quadlets() {
         # [Container] section
         lines.append("[Container]")
         lines.append("Image=" + image)
+
+        # Pod membership
+        pod = container.get('pod', '')
+        if pod:
+            lines.append("Pod=" + pod + ".pod")
 
         # Entrypoint and command
         entrypoint = container.get('entrypoint', '')
@@ -541,6 +628,128 @@ python do_generate_quadlets() {
 
 addtask do_generate_quadlets after do_configure before do_compile
 
+# Generate Quadlet .pod files for all pods
+python do_generate_pods() {
+    import os
+
+    manifest_path = d.getVar('CONTAINER_MANIFEST')
+    if not manifest_path:
+        return
+
+    _, pods = parse_container_manifest(manifest_path, d)
+    if not pods:
+        return
+
+    workdir = d.getVar('WORKDIR')
+
+    for pod in pods:
+        pod_name = pod.get('name', '')
+
+        # Build Quadlet pod file content
+        lines = []
+
+        # [Unit] section
+        lines.append("# Podman Quadlet pod file for " + pod_name)
+        lines.append("# Auto-generated by meta-container-deploy (container-manifest)")
+        lines.append("")
+        lines.append("[Unit]")
+        lines.append("Description=" + pod_name + " pod")
+        lines.append("After=network-online.target container-import.service")
+        lines.append("Wants=network-online.target")
+        lines.append("")
+
+        # [Pod] section
+        lines.append("[Pod]")
+        lines.append("PodName=" + pod_name)
+
+        # Port mappings (pods handle ports, not individual containers)
+        ports = pod.get('ports', [])
+        if ports:
+            for port in ports:
+                lines.append("PublishPort=" + str(port))
+
+        # Network mode
+        network = pod.get('network', '')
+        if network:
+            lines.append("Network=" + network)
+
+        # Volume mounts (shared by all containers in pod)
+        volumes = pod.get('volumes', [])
+        if volumes:
+            for volume in volumes:
+                lines.append("Volume=" + str(volume))
+
+        # Labels
+        labels = pod.get('labels', {})
+        if labels:
+            if isinstance(labels, dict):
+                for key, value in labels.items():
+                    lines.append(f"Label={key}={value}")
+            elif isinstance(labels, list):
+                for label in labels:
+                    lines.append("Label=" + label)
+
+        # DNS configuration
+        dns = pod.get('dns', [])
+        if dns:
+            for server in dns:
+                lines.append("DNS=" + str(server))
+
+        dns_search = pod.get('dns_search', [])
+        if dns_search:
+            for domain in dns_search:
+                lines.append("DNSSearch=" + str(domain))
+
+        # Hostname
+        hostname = pod.get('hostname', '')
+        if hostname:
+            lines.append("Hostname=" + hostname)
+
+        # Static IP/MAC
+        ip = pod.get('ip', '')
+        if ip:
+            lines.append("IP=" + ip)
+
+        mac = pod.get('mac', '')
+        if mac:
+            lines.append("MAC=" + mac)
+
+        # Host mappings for /etc/hosts
+        add_host = pod.get('add_host', [])
+        if add_host:
+            for mapping in add_host:
+                lines.append("AddHost=" + str(mapping))
+
+        # User namespace
+        userns = pod.get('userns', '')
+        if userns:
+            lines.append("Userns=" + userns)
+
+        lines.append("")
+
+        # [Install] section
+        lines.append("[Install]")
+        enabled = pod.get('enabled', True)
+        if enabled:
+            lines.append("WantedBy=multi-user.target")
+        else:
+            lines.append("# Pod disabled - uncomment to enable")
+            lines.append("# WantedBy=multi-user.target")
+
+        # Write the Quadlet pod file
+        quadlet_dir = os.path.join(workdir, 'quadlets')
+        os.makedirs(quadlet_dir, exist_ok=True)
+        pod_file = os.path.join(quadlet_dir, pod_name + ".pod")
+
+        with open(pod_file, 'w') as f:
+            f.write('\n'.join(lines))
+            f.write('\n')
+
+        bb.note("Generated Quadlet pod file for '%s': %s" % (pod_name, pod_file))
+}
+
+addtask do_generate_pods after do_configure before do_compile
+
 # Generate import scripts for all containers
 python do_generate_import_scripts() {
     import os
@@ -549,7 +758,7 @@ python do_generate_import_scripts() {
     if not manifest_path:
         return
 
-    containers = parse_container_manifest(manifest_path, d)
+    containers, _ = parse_container_manifest(manifest_path, d)
     if not containers:
         return
 
@@ -646,15 +855,28 @@ do_install:append() {
         fi
     done
 
+    # Install pod Quadlet files
+    MANIFEST_PODS="${PODS_FROM_MANIFEST}"
+    for POD_NAME in $MANIFEST_PODS; do
+        if [ -f "${WORKDIR}/quadlets/${POD_NAME}.pod" ]; then
+            install -d ${D}${QUADLET_DIR}
+            install -m 0644 ${WORKDIR}/quadlets/${POD_NAME}.pod \
+                ${D}${QUADLET_DIR}/
+
+            bbnote "Installed Quadlet pod file for: ${POD_NAME}"
+        fi
+    done
+
     # Create import marker directory
     install -d ${D}${CONTAINER_IMPORT_MARKER_DIR}
 }
 
-# Set FILES to include all container artifacts
-# Using wildcards since containers are determined at parse time from manifest
+# Set FILES to include all container and pod artifacts
+# Using wildcards since containers/pods are determined at parse time from manifest
 FILES:${PN} += "\
     ${CONTAINER_PRELOAD_DIR}/* \
     ${QUADLET_DIR}/*.container \
+    ${QUADLET_DIR}/*.pod \
     ${sysconfdir}/containers/import.d/*.sh \
     ${CONTAINER_IMPORT_MARKER_DIR} \
 "
