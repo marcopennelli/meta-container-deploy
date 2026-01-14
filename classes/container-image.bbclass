@@ -122,12 +122,10 @@ python do_pull_container() {
 
     # Run skopeo
     try:
-        result = subprocess.run(skopeo_args, check=True, capture_output=True, text=True)
+        subprocess.run(skopeo_args, check=True)
         bb.note(f"Container image {container_name} pulled successfully")
-        if result.stdout:
-            bb.note(result.stdout)
     except subprocess.CalledProcessError as e:
-        bb.fatal(f"Failed to pull container image {full_image}: {e.stderr}")
+        bb.fatal(f"Failed to pull container image {full_image}")
 }
 
 addtask do_pull_container after do_configure before do_compile
