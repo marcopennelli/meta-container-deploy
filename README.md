@@ -26,6 +26,7 @@ This enables reproducible, air-gapped container deployments for embedded Linux s
 - **Private registry support** - Authentication via Docker config.json
 - **Dependency management** - Container service ordering via systemd dependencies
 - **Security options** - Capabilities, security labels, read-only rootfs support
+- **Image verification** - Post-pull OCI structure validation (default) and optional pre-pull registry checks
 
 ## Technology Overview
 
@@ -465,6 +466,7 @@ Pulls container images at build time using skopeo-native.
 | `CONTAINER_AUTH_FILE` | Path to Docker auth config | - |
 | `CONTAINER_DIGEST` | Pin to specific digest | - |
 | `CONTAINER_ARCH` | Override target architecture | auto-detected |
+| `CONTAINER_VERIFY` | Pre-pull verification ("1" to enable) | `0` |
 
 ### container-quadlet.bbclass
 
@@ -532,7 +534,13 @@ Enables container configuration via `local.conf` variables (Method 2). Used by `
 | `CONTAINER_<name>_RESTART` | Restart policy (default: always) |
 | `CONTAINER_<name>_DEPENDS_ON` | Space-separated container dependencies |
 | `CONTAINER_<name>_POD` | Pod name to join |
+| `CONTAINER_<name>_VERIFY` | Pre-pull verification ("1" to enable) |
 | `CONTAINER_<name>_*` | All other container-quadlet variables |
+
+**Global Verification:**
+| Variable | Description |
+|----------|-------------|
+| `CONTAINERS_VERIFY` | Enable pre-pull verification for all containers ("1" to enable) |
 
 **Pod Variables (for local.conf):**
 | Variable | Description |
@@ -554,6 +562,7 @@ Parses YAML/JSON container manifests for dynamic recipe generation (Method 3). U
 | Variable | Description |
 |----------|-------------|
 | `CONTAINER_MANIFEST` | Path to containers.yaml or containers.json |
+| `CONTAINERS_VERIFY` | Enable pre-pull verification for all containers ("1" to enable) |
 
 ## Container Manifest Format
 
@@ -611,6 +620,7 @@ containers:
     registry:                   # Private registry config
       url: <string>
       auth_secret: <string>     # Reference to auth file
+    verify: <bool>              # Pre-pull verification (default: false)
 ```
 
 ## Recipes
@@ -668,6 +678,52 @@ Example container recipe (Method 1) deploying nginx:alpine for layer validation.
     ├── nginx-server.sh
     └── mqtt-broker.sh
 ```
+
+## Image Verification
+
+This layer includes two types of image verification to ensure container images are valid:
+
+### Post-Pull Verification (Default)
+
+After every image pull, the OCI image structure is automatically validated:
+- Checks for required `oci-layout` file with correct version
+- Validates `index.json` contains at least one manifest
+- Verifies `blobs/` directory exists and contains files
+
+If verification fails, the build stops with `bb.fatal()`. This catches:
+- Incomplete downloads
+- Corrupted images
+- Invalid OCI format
+
+### Pre-Pull Verification (Optional)
+
+Optionally verify images exist in the registry before pulling. This catches configuration errors early (typos, missing tags, wrong architecture, auth issues).
+
+**Enable globally:**
+```bitbake
+# In local.conf
+CONTAINERS_VERIFY = "1"
+```
+
+**Enable per-container (local.conf method):**
+```bitbake
+CONTAINER_myapp_VERIFY = "1"
+```
+
+**Enable per-container (manifest method):**
+```yaml
+containers:
+  - name: myapp
+    image: docker.io/library/nginx:alpine
+    verify: true
+```
+
+**Enable for direct recipes:**
+```bitbake
+CONTAINER_VERIFY = "1"
+```
+
+Pre-pull verification uses `skopeo inspect` to check the registry. If the image doesn't exist, has wrong architecture, or requires authentication, the build fails immediately with a clear error message.
 
 ## Boot Sequence
 

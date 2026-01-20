@@ -17,6 +17,7 @@
 #   CONTAINER_AUTH_FILE - Path to Docker auth config for private registries
 #   CONTAINER_DIGEST - Pin to specific digest (recommended for reproducibility)
 #   CONTAINER_ARCH - Target architecture (defaults to TARGET_ARCH mapping)
+#   CONTAINER_VERIFY - Pre-pull verification: "1" to enable (default: "0")
 #
 # Copyright (c) 2025 Marco Pennelli <marco.pennelli@technosec.net>
 # SPDX-License-Identifier: MIT
@@ -31,6 +32,7 @@ CONTAINER_PULL_POLICY ?= "missing"
 CONTAINER_AUTH_FILE ?= ""
 CONTAINER_DIGEST ?= ""
 CONTAINER_ARCH ?= ""
+CONTAINER_VERIFY ?= "0"
 
 # OCI storage locations
 CONTAINER_PRELOAD_DIR = "/var/lib/containers/preloaded"
@@ -79,6 +81,50 @@ python do_validate_container() {
 }
 addtask validate_container before do_compile
 
+# Optional pre-pull verification using skopeo inspect
+# Enable with CONTAINER_VERIFY = "1"
+python do_verify_container() {
+    import subprocess
+
+    verify = d.getVar('CONTAINER_VERIFY')
+    if verify != '1':
+        bb.note("Pre-pull verification disabled (set CONTAINER_VERIFY='1' to enable)")
+        return
+
+    container_image = d.getVar('CONTAINER_IMAGE')
+    container_name = d.getVar('CONTAINER_NAME')
+    container_digest = d.getVar('CONTAINER_DIGEST')
+    container_auth_file = d.getVar('CONTAINER_AUTH_FILE')
+    oci_arch = get_oci_arch(d)
+
+    # Determine full image reference
+    if container_digest:
+        image_base = container_image.split(':')[0]
+        full_image = f"{image_base}@{container_digest}"
+    else:
+        full_image = container_image
+
+    bb.note(f"Verifying container image exists: {full_image}")
+
+    # Build skopeo inspect command
+    skopeo_args = ['skopeo', 'inspect', '--override-arch', oci_arch]
+
+    if container_auth_file and os.path.exists(container_auth_file):
+        skopeo_args.extend(['--authfile', container_auth_file])
+
+    skopeo_args.append(f"docker://{full_image}")
+
+    try:
+        subprocess.run(skopeo_args, check=True)
+        bb.note(f"Container image '{container_name}' verified: {full_image}")
+    except subprocess.CalledProcessError as e:
+        bb.fatal(f"Container image verification failed for '{container_name}' ({full_image}). "
+                 f"Image may not exist, wrong architecture, or authentication required.")
+}
+addtask do_verify_container after do_validate_container before do_pull_container
+do_verify_container[network] = "1"
+do_verify_container[vardeps] = "CONTAINER_IMAGE CONTAINER_NAME CONTAINER_DIGEST CONTAINER_AUTH_FILE CONTAINER_VERIFY"
+
 # Pull container image using skopeo-native
 # This is a separate task that requires network access
 python do_pull_container() {
@@ -126,7 +172,59 @@ python do_pull_container() {
         bb.note(f"Container image {container_name} pulled successfully")
     except subprocess.CalledProcessError as e:
         bb.fatal(f"Failed to pull container image {full_image}")
+
+    # Post-pull verification (default behavior)
+    verify_oci_image(oci_dir, container_name, full_image, d)
 }
+
+def verify_oci_image(oci_dir, container_name, full_image, d):
+    """Verify the pulled OCI image has valid structure."""
+    import os
+    import json
+
+    bb.note(f"Verifying OCI image structure for '{container_name}'")
+
+    # Check required OCI layout file
+    oci_layout = os.path.join(oci_dir, 'oci-layout')
+    if not os.path.exists(oci_layout):
+        bb.fatal(f"OCI image verification failed for '{container_name}': missing oci-layout file")
+
+    try:
+        with open(oci_layout, 'r') as f:
+            layout = json.load(f)
+        if layout.get('imageLayoutVersion') != '1.0.0':
+            bb.warn(f"Unexpected OCI layout version for '{container_name}': {layout.get('imageLayoutVersion')}")
+    except (json.JSONDecodeError, IOError) as e:
+        bb.fatal(f"OCI image verification failed for '{container_name}': invalid oci-layout file: {e}")
+
+    # Check index.json exists
+    index_file = os.path.join(oci_dir, 'index.json')
+    if not os.path.exists(index_file):
+        bb.fatal(f"OCI image verification failed for '{container_name}': missing index.json")
+
+    try:
+        with open(index_file, 'r') as f:
+            index = json.load(f)
+        manifests = index.get('manifests', [])
+        if not manifests:
+            bb.fatal(f"OCI image verification failed for '{container_name}': no manifests in index.json")
+    except (json.JSONDecodeError, IOError) as e:
+        bb.fatal(f"OCI image verification failed for '{container_name}': invalid index.json: {e}")
+
+    # Check blobs directory exists and has content
+    blobs_dir = os.path.join(oci_dir, 'blobs')
+    if not os.path.isdir(blobs_dir):
+        bb.fatal(f"OCI image verification failed for '{container_name}': missing blobs directory")
+
+    # Verify at least one blob exists
+    blob_count = 0
+    for root, dirs, files in os.walk(blobs_dir):
+        blob_count += len(files)
+
+    if blob_count == 0:
+        bb.fatal(f"OCI image verification failed for '{container_name}': no blobs found")
+
+    bb.note(f"OCI image verified for '{container_name}': {blob_count} blobs, {len(manifests)} manifest(s)")
 
 addtask do_pull_container after do_configure before do_compile
 do_pull_container[network] = "1"

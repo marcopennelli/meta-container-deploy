@@ -45,6 +45,10 @@
 #   PULL_POLICY - Pull policy: always, missing, never (default: missing)
 #   DIGEST - Pin to specific digest for reproducibility
 #   POD - Pod name to join (container becomes a pod member)
+#   VERIFY - Pre-pull verification: "1" to enable (default: "0")
+#
+# Global verification option:
+#   CONTAINERS_VERIFY - Enable pre-pull verification for all containers ("1" to enable)
 #
 # Pod configuration (PODS variable + POD_<name>_<VAR>):
 #   PODS - Space-separated list of pod names to create
@@ -137,8 +141,11 @@ def get_pod_var(d, pod_name, var_name, default=''):
     var = d.getVar('POD_%s_%s' % (pod_name, var_name))
     return var if var else default
 
+# Global pre-pull verification flag
+CONTAINERS_VERIFY ?= "0"
+
 # All container configuration variable suffixes
-CONTAINER_VAR_SUFFIXES = "IMAGE PORTS VOLUMES ENVIRONMENT NETWORK RESTART USER WORKING_DIR DEVICES CAPS_ADD CAPS_DROP PRIVILEGED READ_ONLY MEMORY_LIMIT CPU_LIMIT ENABLED LABELS DEPENDS_ON ENTRYPOINT COMMAND PULL_POLICY DIGEST AUTH_FILE SECURITY_OPTS POD"
+CONTAINER_VAR_SUFFIXES = "IMAGE PORTS VOLUMES ENVIRONMENT NETWORK RESTART USER WORKING_DIR DEVICES CAPS_ADD CAPS_DROP PRIVILEGED READ_ONLY MEMORY_LIMIT CPU_LIMIT ENABLED LABELS DEPENDS_ON ENTRYPOINT COMMAND PULL_POLICY DIGEST AUTH_FILE SECURITY_OPTS POD VERIFY"
 
 # All pod configuration variable suffixes
 POD_VAR_SUFFIXES = "PORTS NETWORK VOLUMES LABELS DNS DNS_SEARCH HOSTNAME IP MAC ADD_HOST USERNS ENABLED"
@@ -217,6 +224,106 @@ python __anonymous() {
         bb.note("Configured %d pods from local.conf: %s" % (len(pods), ', '.join(pods)))
 }
 
+def verify_oci_image(oci_dir, container_name, full_image, d):
+    """Verify the pulled OCI image has valid structure."""
+    import os
+    import json
+
+    bb.note(f"Verifying OCI image structure for '{container_name}'")
+
+    # Check required OCI layout file
+    oci_layout = os.path.join(oci_dir, 'oci-layout')
+    if not os.path.exists(oci_layout):
+        bb.fatal(f"OCI image verification failed for '{container_name}': missing oci-layout file")
+
+    try:
+        with open(oci_layout, 'r') as f:
+            layout = json.load(f)
+        if layout.get('imageLayoutVersion') != '1.0.0':
+            bb.warn(f"Unexpected OCI layout version for '{container_name}': {layout.get('imageLayoutVersion')}")
+    except (json.JSONDecodeError, IOError) as e:
+        bb.fatal(f"OCI image verification failed for '{container_name}': invalid oci-layout file: {e}")
+
+    # Check index.json exists
+    index_file = os.path.join(oci_dir, 'index.json')
+    if not os.path.exists(index_file):
+        bb.fatal(f"OCI image verification failed for '{container_name}': missing index.json")
+
+    try:
+        with open(index_file, 'r') as f:
+            index = json.load(f)
+        manifests = index.get('manifests', [])
+        if not manifests:
+            bb.fatal(f"OCI image verification failed for '{container_name}': no manifests in index.json")
+    except (json.JSONDecodeError, IOError) as e:
+        bb.fatal(f"OCI image verification failed for '{container_name}': invalid index.json: {e}")
+
+    # Check blobs directory exists and has content
+    blobs_dir = os.path.join(oci_dir, 'blobs')
+    if not os.path.isdir(blobs_dir):
+        bb.fatal(f"OCI image verification failed for '{container_name}': missing blobs directory")
+
+    # Verify at least one blob exists
+    blob_count = 0
+    for root, dirs, files in os.walk(blobs_dir):
+        blob_count += len(files)
+
+    if blob_count == 0:
+        bb.fatal(f"OCI image verification failed for '{container_name}': no blobs found")
+
+    bb.note(f"OCI image verified for '{container_name}': {blob_count} blobs, {len(manifests)} manifest(s)")
+
+# Optional pre-pull verification using skopeo inspect
+# Enable with CONTAINERS_VERIFY = "1" or per-container CONTAINER_<name>_VERIFY = "1"
+python do_verify_containers() {
+    import subprocess
+    import os
+
+    containers = get_container_list(d)
+    if not containers:
+        return
+
+    global_verify = d.getVar('CONTAINERS_VERIFY') == '1'
+    oci_arch = get_oci_arch(d)
+
+    for container_name in containers:
+        # Check per-container or global verify flag
+        container_verify = get_container_var(d, container_name, 'VERIFY')
+        if container_verify != '1' and not global_verify:
+            continue
+
+        image = get_container_var(d, container_name, 'IMAGE')
+        digest = get_container_var(d, container_name, 'DIGEST')
+        auth_file = get_container_var(d, container_name, 'AUTH_FILE')
+
+        # Determine full image reference
+        if digest:
+            image_base = image.split(':')[0]
+            full_image = f"{image_base}@{digest}"
+        else:
+            full_image = image
+
+        bb.note(f"Verifying container image exists: '{container_name}' ({full_image})")
+
+        # Build skopeo inspect command
+        skopeo_args = ['skopeo', 'inspect', '--override-arch', oci_arch]
+
+        if auth_file and os.path.exists(auth_file):
+            skopeo_args.extend(['--authfile', auth_file])
+
+        skopeo_args.append(f"docker://{full_image}")
+
+        try:
+            subprocess.run(skopeo_args, check=True)
+            bb.note(f"Container image '{container_name}' verified: {full_image}")
+        except subprocess.CalledProcessError as e:
+            bb.fatal(f"Container image verification failed for '{container_name}' ({full_image}). "
+                     f"Image may not exist, wrong architecture, or authentication required.")
+}
+addtask do_verify_containers after do_configure before do_pull_containers
+do_verify_containers[network] = "1"
+do_verify_containers[vardeps] = "CONTAINERS CONTAINERS_VERIFY"
+
 # Pull all container images using skopeo-native
 python do_pull_containers() {
     import subprocess
@@ -268,9 +375,12 @@ python do_pull_containers() {
             bb.note(f"Container image '{container_name}' pulled successfully")
         except subprocess.CalledProcessError as e:
             bb.fatal(f"Failed to pull container image '{container_name}' ({full_image})")
+
+        # Post-pull verification (default behavior)
+        verify_oci_image(oci_dir, container_name, full_image, d)
 }
 
-addtask do_pull_containers after do_configure before do_compile
+addtask do_pull_containers after do_verify_containers before do_compile
 do_pull_containers[network] = "1"
 do_pull_containers[vardeps] = "CONTAINERS"
 
