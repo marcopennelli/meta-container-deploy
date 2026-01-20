@@ -176,6 +176,15 @@ python __anonymous() {
         bb.warn("Container manifest not found: %s" % manifest_path)
         return
 
+    # Add manifest file as a file checksum dependency so BitBake tracks changes
+    # This ensures the recipe is reparsed when the manifest content changes
+    d.appendVarFlag('do_install', 'file-checksums', ' ' + manifest_path + ':True')
+    d.appendVarFlag('do_pull_containers', 'file-checksums', ' ' + manifest_path + ':True')
+    d.appendVarFlag('do_verify_containers', 'file-checksums', ' ' + manifest_path + ':True')
+    d.appendVarFlag('do_generate_quadlets', 'file-checksums', ' ' + manifest_path + ':True')
+    d.appendVarFlag('do_generate_pods', 'file-checksums', ' ' + manifest_path + ':True')
+    d.appendVarFlag('do_generate_import_scripts', 'file-checksums', ' ' + manifest_path + ':True')
+
     # Parse the manifest
     try:
         containers, pods = parse_container_manifest(manifest_path, d)
@@ -934,6 +943,10 @@ fi
 addtask do_generate_import_scripts after do_configure before do_compile
 
 # Install all container artifacts
+# Note: CONTAINERS_FROM_MANIFEST and PODS_FROM_MANIFEST are set at parse time
+# from the manifest file content
+do_install[vardeps] += "CONTAINERS_FROM_MANIFEST PODS_FROM_MANIFEST"
+
 do_install:append() {
     # Get list of containers from manifest
     MANIFEST_CONTAINERS="${CONTAINERS_FROM_MANIFEST}"
