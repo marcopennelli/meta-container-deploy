@@ -65,7 +65,8 @@ log_info "Current partition size: $CURRENT_SIZE bytes"
 log_info "Device size: $DEVICE_SIZE bytes"
 
 # Check if expansion is needed (leave 10% margin)
-THRESHOLD=$(echo "$DEVICE_SIZE * 90 / 100" | bc 2>/dev/null || echo "$DEVICE_SIZE")
+# Use shell arithmetic instead of bc for portability
+THRESHOLD=$((DEVICE_SIZE * 9 / 10))
 if [ "$CURRENT_SIZE" -ge "$THRESHOLD" ] 2>/dev/null; then
     log_info "Partition already at maximum size, no expansion needed"
     mkdir -p "$(dirname "$MARKER_FILE")"
