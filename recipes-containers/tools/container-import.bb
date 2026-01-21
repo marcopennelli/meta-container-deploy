@@ -38,7 +38,8 @@ do_install() {
 [Unit]
 Description=Import preloaded container images into Podman storage
 DefaultDependencies=no
-After=local-fs.target
+# Run after rootfs-expand (if installed) to ensure disk space is available
+After=local-fs.target rootfs-expand.service
 Before=podman.service
 ConditionDirectoryNotEmpty=/etc/containers/import.d
 

@@ -80,9 +80,16 @@ CONTAINERS ?= ""
 # List of pods to configure
 PODS ?= ""
 
+# Enable automatic rootfs expansion on first boot
+# Set to "1" to include rootfs-expand package which expands the root
+# filesystem to use all available storage space on first boot.
+# Useful for SD card deployments where image size < target media size.
+ROOTFS_EXPAND ?= "0"
+
 # Include base dependencies
 DEPENDS += "skopeo-native"
 RDEPENDS:${PN} += "podman container-import"
+RDEPENDS:${PN} += "${@'rootfs-expand' if d.getVar('ROOTFS_EXPAND') == '1' else ''}"
 
 # OCI storage locations (from container-image.bbclass)
 CONTAINER_PRELOAD_DIR = "/var/lib/containers/preloaded"
