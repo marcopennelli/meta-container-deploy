@@ -1,0 +1,20 @@
+[Unit]
+Description=Expand root filesystem to use all available space
+DefaultDependencies=no
+Conflicts=shutdown.target
+# Run very early, after local filesystems are mounted but before most services
+Before=sysinit.target shutdown.target container-import.service
+After=local-fs.target
+# Only run if not already expanded
+ConditionPathExists=!/var/lib/rootfs-expand/.expanded
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/rootfs-expand
+TimeoutSec=0
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=sysinit.target
