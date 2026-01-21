@@ -27,6 +27,7 @@ This enables reproducible, air-gapped container deployments for embedded Linux s
 - **Dependency management** - Container service ordering via systemd dependencies
 - **Security options** - Capabilities, security labels, read-only rootfs support
 - **Image verification** - Post-pull OCI structure validation (default) and optional pre-pull registry checks
+- **Rootfs auto-expansion** - Automatically expand root filesystem to full storage capacity on first boot (ideal for SD card deployments)
 
 ## Technology Overview
 
@@ -537,10 +538,11 @@ Enables container configuration via `local.conf` variables (Method 2). Used by `
 | `CONTAINER_<name>_VERIFY` | Pre-pull verification ("1" to enable) |
 | `CONTAINER_<name>_*` | All other container-quadlet variables |
 
-**Global Verification:**
+**Global Options:**
 | Variable | Description |
 |----------|-------------|
 | `CONTAINERS_VERIFY` | Enable pre-pull verification for all containers ("1" to enable) |
+| `ROOTFS_EXPAND` | Enable automatic rootfs expansion on first boot ("1" to enable) |
 
 **Pod Variables (for local.conf):**
 | Variable | Description |
@@ -563,10 +565,15 @@ Parses YAML/JSON container manifests for dynamic recipe generation (Method 3). U
 |----------|-------------|
 | `CONTAINER_MANIFEST` | Path to containers.yaml or containers.json |
 | `CONTAINERS_VERIFY` | Enable pre-pull verification for all containers ("1" to enable) |
+| `ROOTFS_EXPAND` | Enable automatic rootfs expansion on first boot ("1" to enable) |
 
 ## Container Manifest Format
 
 ```yaml
+# Global options
+rootfs_expand: <bool>           # Auto-expand rootfs on first boot (default: false)
+containers_verify: <bool>       # Pre-pull verification for all containers (default: false)
+
 # Optional: Define pods for grouping containers
 pods:
   - name: <string>              # Required: unique pod name
@@ -628,6 +635,32 @@ containers:
 ### container-import
 
 Systemd service that imports preloaded OCI container images into Podman storage at first boot.
+
+### rootfs-expand
+
+Automatic root filesystem expansion service for SD card and embedded deployments. When included, the root partition and filesystem will automatically expand to use all available storage space on first boot.
+
+**Usage:**
+```bash
+# In local.conf
+IMAGE_INSTALL:append = " rootfs-expand"
+
+# Or via ROOTFS_EXPAND variable when using container-localconf class
+ROOTFS_EXPAND = "1"
+```
+
+**Features:**
+- Expands partition using `growpart` (preferred) or `sfdisk` (fallback)
+- Supports ext2/ext3/ext4, btrfs, xfs, and f2fs filesystems
+- Supports SD cards (mmcblk), NVMe, and SATA/USB drives
+- Runs very early in boot (before container-import)
+- Only executes once (uses marker file)
+- Logs to systemd journal
+
+**Benefits for container deployments:**
+- Generate smaller images during build (reduces build time and storage)
+- Same image works on any SD card size (8GB, 16GB, 32GB, etc.)
+- Ensures space is available for container images before import
 
 ### packagegroup-container-support
 
@@ -725,12 +758,24 @@ CONTAINER_VERIFY = "1"
 
 Pre-pull verification uses `skopeo inspect` to check the registry. If the image doesn't exist, has wrong architecture, or requires authentication, the build fails immediately with a clear error message.
 
+## Build Sequence
+
+During `bitbake`, the following steps occur for container images:
+
+1. **Pre-pull verification** (optional) - `skopeo inspect` validates images exist in registry
+2. **Image pulling** - `skopeo copy` downloads images to OCI format in build directory
+3. **Post-pull verification** (default) - Validates OCI structure (oci-layout, index.json, blobs)
+4. **Quadlet generation** - Creates `.container` and `.pod` files from configuration
+5. **Rootfs installation** - OCI images and Quadlet files are installed to target rootfs
+
 ## Boot Sequence
 
-1. `container-import.service` runs before container services
-2. Import scripts in `/etc/containers/import.d/` are executed
-3. OCI images are imported into Podman storage via skopeo
-4. Import markers are created to prevent re-import
+On device first boot:
+
+1. `rootfs-expand.service` runs (if installed) - Expands root filesystem to full storage capacity
+2. `container-import.service` runs - Imports preloaded OCI images into Podman storage
+3. Import scripts in `/etc/containers/import.d/` are executed
+4. Import markers are created to prevent re-import on subsequent boots
 5. Quadlet generator creates systemd units from `.container` and `.pod` files
 6. Pod services start first, then container services in dependency order
 
