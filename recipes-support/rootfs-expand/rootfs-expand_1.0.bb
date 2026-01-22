@@ -36,15 +36,13 @@ S = "${WORKDIR}"
 RDEPENDS:${PN} = " \
     util-linux-lsblk \
     util-linux-findmnt \
+    util-linux-sfdisk \
     e2fsprogs-resize2fs \
 "
 
-# Optional but recommended for best compatibility
+# Optional packages for additional functionality
 RRECOMMENDS:${PN} = " \
-    cloud-utils-growpart \
-    util-linux-sfdisk \
     util-linux-partprobe \
-    parted \
 "
 
 inherit systemd
