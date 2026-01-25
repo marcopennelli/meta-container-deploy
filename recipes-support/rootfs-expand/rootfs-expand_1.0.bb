@@ -41,8 +41,10 @@ RDEPENDS:${PN} = " \
 "
 
 # Optional packages for additional functionality
+# partx is more reliable than partprobe for mounted partitions
 RRECOMMENDS:${PN} = " \
     util-linux-partprobe \
+    util-linux-partx \
 "
 
 inherit systemd

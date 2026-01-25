@@ -87,10 +87,12 @@ if [ "$CURRENT_SIZE" -ge "$THRESHOLD" ] 2>/dev/null; then
 fi
 
 # Expand partition using growpart if available
+PARTITION_CHANGED=0
 if command -v growpart >/dev/null 2>&1; then
     log_info "Expanding partition using growpart..."
     if growpart "$ROOT_DEV" "$PART_NUM"; then
         log_info "Partition expanded successfully"
+        PARTITION_CHANGED=1
     else
         # growpart returns 1 if partition is already at max size
         GROW_RC=$?
@@ -105,10 +107,33 @@ elif command -v sfdisk >/dev/null 2>&1; then
     # Fallback to sfdisk
     log_info "Expanding partition using sfdisk..."
     echo ",+" | sfdisk -N "$PART_NUM" "$ROOT_DEV" --no-reread 2>/dev/null || true
-    partprobe "$ROOT_DEV" 2>/dev/null || true
+    PARTITION_CHANGED=1
 else
     log_error "Neither growpart nor sfdisk available for partition expansion"
     exit 1
+fi
+
+# Inform kernel of partition table changes
+# This is critical for resize2fs to see the new partition size
+if [ "$PARTITION_CHANGED" -eq 1 ]; then
+    log_info "Updating kernel partition table..."
+
+    # Try partprobe first (from parted)
+    if command -v partprobe >/dev/null 2>&1; then
+        partprobe "$ROOT_DEV" 2>/dev/null || true
+    fi
+
+    # Also try partx to update specific partition (more reliable for mounted partitions)
+    if command -v partx >/dev/null 2>&1; then
+        partx -u "$ROOT_PART" 2>/dev/null || true
+    fi
+
+    # Small delay to let kernel process the changes
+    sleep 1
+
+    # Verify the kernel sees the new size
+    NEW_PART_SIZE=$(lsblk -b -n -d -o SIZE "$ROOT_PART" 2>/dev/null | tr -d '[:space:]')
+    log_info "Kernel now sees partition size: $NEW_PART_SIZE bytes"
 fi
 
 # Resize the filesystem
