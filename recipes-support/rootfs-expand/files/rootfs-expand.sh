@@ -58,9 +58,10 @@ esac
 log_info "Root device: $ROOT_DEV, partition number: $PART_NUM"
 
 # Get current and max partition sizes
-# Use tr to remove any whitespace/newlines from lsblk output
-CURRENT_SIZE=$(lsblk -b -n -o SIZE "$ROOT_PART" 2>/dev/null | tr -d '[:space:]')
-DEVICE_SIZE=$(lsblk -b -n -o SIZE "$ROOT_DEV" 2>/dev/null | tr -d '[:space:]')
+# Use head -1 to get only the device/partition size (not children)
+# Use tr to remove any trailing whitespace
+CURRENT_SIZE=$(lsblk -b -n -d -o SIZE "$ROOT_PART" 2>/dev/null | tr -d '[:space:]')
+DEVICE_SIZE=$(lsblk -b -n -d -o SIZE "$ROOT_DEV" 2>/dev/null | tr -d '[:space:]')
 
 # Ensure we have valid numbers, default to 0 if empty
 CURRENT_SIZE=${CURRENT_SIZE:-0}
