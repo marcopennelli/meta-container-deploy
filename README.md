@@ -420,6 +420,77 @@ containers:
     restart_policy: always
 ```
 
+#### Advanced Container Options (Manifest)
+
+```yaml
+# containers.yaml with health checks, logging, and podman options
+containers:
+  - name: api-server
+    image: myregistry/api:v1.2.3
+    ports:
+      - "8080:8080"
+    restart_policy: always
+
+    # Podman-specific options
+    cgroups: split              # Cgroups mode for systemd compatibility
+    sdnotify: container         # Let container send sd_notify to systemd
+    timezone: Europe/Rome       # Container timezone
+    stop_timeout: 30            # Wait 30s before SIGKILL
+
+    # Health check configuration
+    health_cmd: "CMD-SHELL curl -f http://localhost:8080/health || exit 1"
+    health_interval: 30s
+    health_timeout: 10s
+    health_retries: 3
+    health_start_period: 60s
+
+    # Logging configuration
+    log_driver: journald
+    log_opt:
+      tag: "api-server"
+
+    # Resource limits
+    memory_limit: 512m
+    cpu_limit: 1.0
+    ulimits:
+      nofile: "65536:65536"
+      nproc: "4096:4096"
+```
+
+#### Advanced Container Options (local.conf)
+
+```bitbake
+CONTAINERS = "api-server"
+
+CONTAINER_api_server_IMAGE = "myregistry/api:v1.2.3"
+CONTAINER_api_server_PORTS = "8080:8080"
+CONTAINER_api_server_RESTART = "always"
+
+# Podman-specific options
+CONTAINER_api_server_CGROUPS = "split"
+CONTAINER_api_server_SDNOTIFY = "container"
+CONTAINER_api_server_TIMEZONE = "Europe/Rome"
+CONTAINER_api_server_STOP_TIMEOUT = "30"
+
+# Health check
+CONTAINER_api_server_HEALTH_CMD = "CMD-SHELL curl -f http://localhost:8080/health || exit 1"
+CONTAINER_api_server_HEALTH_INTERVAL = "30s"
+CONTAINER_api_server_HEALTH_TIMEOUT = "10s"
+CONTAINER_api_server_HEALTH_RETRIES = "3"
+CONTAINER_api_server_HEALTH_START_PERIOD = "60s"
+
+# Logging
+CONTAINER_api_server_LOG_DRIVER = "journald"
+CONTAINER_api_server_LOG_OPT = "tag=api-server"
+
+# Resource limits
+CONTAINER_api_server_MEMORY_LIMIT = "512m"
+CONTAINER_api_server_CPU_LIMIT = "1.0"
+CONTAINER_api_server_ULIMITS = "nofile=65536:65536 nproc=4096:4096"
+
+IMAGE_INSTALL:append = " packagegroup-containers-localconf"
+```
+
 ---
 
 ### Method 4: Packagegroup Approach
@@ -497,6 +568,18 @@ Generates Podman Quadlet .container files for systemd integration.
 | `CONTAINER_CPU_LIMIT` | CPU limit (e.g., 0.5) | - |
 | `CONTAINER_ENABLED` | Set to "0" to disable | `1` |
 | `CONTAINER_POD` | Pod name to join (makes container a pod member) | - |
+| `CONTAINER_CGROUPS` | Cgroups mode: enabled, disabled, no-conmon, split | - |
+| `CONTAINER_SDNOTIFY` | SD-Notify mode: conmon, container, healthy, ignore | - |
+| `CONTAINER_TIMEZONE` | Container timezone (e.g., UTC, Europe/Rome, local) | - |
+| `CONTAINER_STOP_TIMEOUT` | Seconds to wait before force-killing | - |
+| `CONTAINER_HEALTH_CMD` | Health check command | - |
+| `CONTAINER_HEALTH_INTERVAL` | Interval between health checks (e.g., 30s) | - |
+| `CONTAINER_HEALTH_TIMEOUT` | Timeout for health check (e.g., 10s) | - |
+| `CONTAINER_HEALTH_RETRIES` | Consecutive failures before unhealthy | - |
+| `CONTAINER_HEALTH_START_PERIOD` | Initialization time before checks count | - |
+| `CONTAINER_LOG_DRIVER` | Log driver: journald, k8s-file, none, passthrough | - |
+| `CONTAINER_LOG_OPT` | Space-separated log driver options (key=value) | - |
+| `CONTAINER_ULIMITS` | Space-separated ulimits (e.g., nofile=65536:65536) | - |
 
 ### container-pod.bbclass
 
@@ -536,7 +619,18 @@ Enables container configuration via `local.conf` variables (Method 2). Used by `
 | `CONTAINER_<name>_DEPENDS_ON` | Space-separated container dependencies |
 | `CONTAINER_<name>_POD` | Pod name to join |
 | `CONTAINER_<name>_VERIFY` | Pre-pull verification ("1" to enable) |
-| `CONTAINER_<name>_*` | All other container-quadlet variables |
+| `CONTAINER_<name>_CGROUPS` | Cgroups mode: enabled, disabled, no-conmon, split |
+| `CONTAINER_<name>_SDNOTIFY` | SD-Notify mode: conmon, container, healthy, ignore |
+| `CONTAINER_<name>_TIMEZONE` | Container timezone (e.g., UTC, Europe/Rome, local) |
+| `CONTAINER_<name>_STOP_TIMEOUT` | Seconds to wait before force-killing |
+| `CONTAINER_<name>_HEALTH_CMD` | Health check command |
+| `CONTAINER_<name>_HEALTH_INTERVAL` | Interval between health checks (e.g., 30s) |
+| `CONTAINER_<name>_HEALTH_TIMEOUT` | Timeout for health check (e.g., 10s) |
+| `CONTAINER_<name>_HEALTH_RETRIES` | Consecutive failures before unhealthy |
+| `CONTAINER_<name>_HEALTH_START_PERIOD` | Initialization time before checks count |
+| `CONTAINER_<name>_LOG_DRIVER` | Log driver: journald, k8s-file, none, passthrough |
+| `CONTAINER_<name>_LOG_OPT` | Space-separated log driver options (key=value) |
+| `CONTAINER_<name>_ULIMITS` | Space-separated ulimits (e.g., nofile=65536:65536) |
 
 **Global Options:**
 | Variable | Description |
@@ -628,6 +722,21 @@ containers:
       url: <string>
       auth_secret: <string>     # Reference to auth file
     verify: <bool>              # Pre-pull verification (default: false)
+    cgroups: <string>           # Cgroups mode: enabled, disabled, no-conmon, split
+    sdnotify: <string>          # SD-Notify mode: conmon, container, healthy, ignore
+    timezone: <string>          # Container timezone (e.g., UTC, Europe/Rome, local)
+    stop_timeout: <int>         # Seconds to wait before force-killing
+    health_cmd: <string>        # Health check command
+    health_interval: <string>   # Interval between health checks (e.g., 30s)
+    health_timeout: <string>    # Timeout for health check (e.g., 10s)
+    health_retries: <int>       # Consecutive failures before unhealthy
+    health_start_period: <string>  # Initialization time before checks count
+    log_driver: <string>        # Log driver: journald, k8s-file, none, passthrough
+    log_opt:                    # Log driver options
+      key: value
+    ulimits:                    # Resource limits
+      nofile: "65536:65536"
+      nproc: "4096:4096"
 ```
 
 ## Recipes

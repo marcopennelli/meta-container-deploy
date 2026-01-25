@@ -46,6 +46,18 @@
 #   DIGEST - Pin to specific digest for reproducibility
 #   POD - Pod name to join (container becomes a pod member)
 #   VERIFY - Pre-pull verification: "1" to enable (default: "0")
+#   CGROUPS - Cgroups mode: enabled, disabled, no-conmon, split
+#   SDNOTIFY - SD-Notify mode: conmon, container, healthy, ignore
+#   TIMEZONE - Container timezone (e.g., UTC, Europe/Rome, local)
+#   STOP_TIMEOUT - Seconds to wait before force-killing (default: 10)
+#   HEALTH_CMD - Health check command
+#   HEALTH_INTERVAL - Interval between health checks (e.g., 30s)
+#   HEALTH_TIMEOUT - Timeout for health check (e.g., 10s)
+#   HEALTH_RETRIES - Consecutive failures before unhealthy
+#   HEALTH_START_PERIOD - Initialization time before checks count
+#   LOG_DRIVER - Log driver: journald, k8s-file, none, passthrough
+#   LOG_OPT - Space-separated log driver options (key=value)
+#   ULIMITS - Space-separated ulimits (e.g., nofile=65536:65536)
 #
 # Global verification option:
 #   CONTAINERS_VERIFY - Enable pre-pull verification for all containers ("1" to enable)
@@ -152,7 +164,7 @@ def get_pod_var(d, pod_name, var_name, default=''):
 CONTAINERS_VERIFY ?= "0"
 
 # All container configuration variable suffixes
-CONTAINER_VAR_SUFFIXES = "IMAGE PORTS VOLUMES ENVIRONMENT NETWORK RESTART USER WORKING_DIR DEVICES CAPS_ADD CAPS_DROP PRIVILEGED READ_ONLY MEMORY_LIMIT CPU_LIMIT ENABLED LABELS DEPENDS_ON ENTRYPOINT COMMAND PULL_POLICY DIGEST AUTH_FILE SECURITY_OPTS POD VERIFY"
+CONTAINER_VAR_SUFFIXES = "IMAGE PORTS VOLUMES ENVIRONMENT NETWORK RESTART USER WORKING_DIR DEVICES CAPS_ADD CAPS_DROP PRIVILEGED READ_ONLY MEMORY_LIMIT CPU_LIMIT ENABLED LABELS DEPENDS_ON ENTRYPOINT COMMAND PULL_POLICY DIGEST AUTH_FILE SECURITY_OPTS POD VERIFY CGROUPS SDNOTIFY TIMEZONE STOP_TIMEOUT HEALTH_CMD HEALTH_INTERVAL HEALTH_TIMEOUT HEALTH_RETRIES HEALTH_START_PERIOD LOG_DRIVER LOG_OPT ULIMITS"
 
 # All pod configuration variable suffixes
 POD_VAR_SUFFIXES = "PORTS NETWORK VOLUMES LABELS DNS DNS_SEARCH HOSTNAME IP MAC ADD_HOST USERNS ENABLED"
@@ -525,6 +537,62 @@ python do_generate_quadlets() {
         if cpu_limit:
             lines.append("PodmanArgs=--cpus " + cpu_limit)
 
+        # Cgroups mode
+        cgroups = get_container_var(d, container_name, 'CGROUPS')
+        if cgroups:
+            lines.append("PodmanArgs=--cgroups " + cgroups)
+
+        # SD-Notify mode
+        sdnotify = get_container_var(d, container_name, 'SDNOTIFY')
+        if sdnotify:
+            lines.append("Notify=" + ("true" if sdnotify == "container" else "false"))
+            if sdnotify != "conmon":
+                lines.append("PodmanArgs=--sdnotify " + sdnotify)
+
+        # Timezone
+        timezone = get_container_var(d, container_name, 'TIMEZONE')
+        if timezone:
+            lines.append("Timezone=" + timezone)
+
+        # Health check options
+        health_cmd = get_container_var(d, container_name, 'HEALTH_CMD')
+        if health_cmd:
+            lines.append("HealthCmd=" + health_cmd)
+
+        health_interval = get_container_var(d, container_name, 'HEALTH_INTERVAL')
+        if health_interval:
+            lines.append("HealthInterval=" + health_interval)
+
+        health_timeout = get_container_var(d, container_name, 'HEALTH_TIMEOUT')
+        if health_timeout:
+            lines.append("HealthTimeout=" + health_timeout)
+
+        health_retries = get_container_var(d, container_name, 'HEALTH_RETRIES')
+        if health_retries:
+            lines.append("HealthRetries=" + health_retries)
+
+        health_start_period = get_container_var(d, container_name, 'HEALTH_START_PERIOD')
+        if health_start_period:
+            lines.append("HealthStartPeriod=" + health_start_period)
+
+        # Log driver
+        log_driver = get_container_var(d, container_name, 'LOG_DRIVER')
+        if log_driver:
+            lines.append("LogDriver=" + log_driver)
+
+        # Log options
+        log_opt = get_container_var(d, container_name, 'LOG_OPT')
+        if log_opt:
+            for opt in log_opt.split():
+                if '=' in opt:
+                    lines.append("PodmanArgs=--log-opt " + opt)
+
+        # Ulimits
+        ulimits = get_container_var(d, container_name, 'ULIMITS')
+        if ulimits:
+            for ulimit in ulimits.split():
+                lines.append("Ulimit=" + ulimit)
+
         lines.append("")
 
         # [Service] section
@@ -532,6 +600,12 @@ python do_generate_quadlets() {
         restart = get_container_var(d, container_name, 'RESTART', 'always')
         lines.append("Restart=" + restart)
         lines.append("TimeoutStartSec=900")
+
+        # Stop timeout
+        stop_timeout = get_container_var(d, container_name, 'STOP_TIMEOUT')
+        if stop_timeout:
+            lines.append("TimeoutStopSec=" + stop_timeout)
+
         lines.append("")
 
         # [Install] section

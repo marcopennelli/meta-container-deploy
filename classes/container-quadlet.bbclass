@@ -34,6 +34,18 @@
 #   CONTAINER_CPU_LIMIT - CPU limit (e.g., 0.5, 2)
 #   CONTAINER_ENABLED - Set to "0" to disable auto-start (default: 1)
 #   CONTAINER_POD - Pod name to join (generates Pod=<name>.pod directive)
+#   CONTAINER_CGROUPS - Cgroups mode: enabled, disabled, no-conmon, split
+#   CONTAINER_SDNOTIFY - SD-Notify mode: conmon, container, healthy, ignore
+#   CONTAINER_TIMEZONE - Container timezone (e.g., UTC, Europe/Rome, local)
+#   CONTAINER_STOP_TIMEOUT - Seconds to wait before force-killing (default: 10)
+#   CONTAINER_HEALTH_CMD - Health check command
+#   CONTAINER_HEALTH_INTERVAL - Interval between health checks (e.g., 30s)
+#   CONTAINER_HEALTH_TIMEOUT - Timeout for health check (e.g., 10s)
+#   CONTAINER_HEALTH_RETRIES - Consecutive failures before unhealthy
+#   CONTAINER_HEALTH_START_PERIOD - Initialization time before checks count
+#   CONTAINER_LOG_DRIVER - Log driver: journald, k8s-file, none, passthrough
+#   CONTAINER_LOG_OPT - Space-separated log driver options (key=value)
+#   CONTAINER_ULIMITS - Space-separated ulimits (e.g., nofile=65536:65536)
 #
 # Pod membership:
 #   When CONTAINER_POD is set, the container becomes a member of the specified pod.
@@ -71,6 +83,18 @@ CONTAINER_MEMORY_LIMIT ?= ""
 CONTAINER_CPU_LIMIT ?= ""
 CONTAINER_ENABLED ?= "1"
 CONTAINER_POD ?= ""
+CONTAINER_CGROUPS ?= ""
+CONTAINER_SDNOTIFY ?= ""
+CONTAINER_TIMEZONE ?= ""
+CONTAINER_STOP_TIMEOUT ?= ""
+CONTAINER_HEALTH_CMD ?= ""
+CONTAINER_HEALTH_INTERVAL ?= ""
+CONTAINER_HEALTH_TIMEOUT ?= ""
+CONTAINER_HEALTH_RETRIES ?= ""
+CONTAINER_HEALTH_START_PERIOD ?= ""
+CONTAINER_LOG_DRIVER ?= ""
+CONTAINER_LOG_OPT ?= ""
+CONTAINER_ULIMITS ?= ""
 
 # Quadlet installation directory
 QUADLET_DIR = "${sysconfdir}/containers/systemd"
@@ -236,6 +260,62 @@ python do_generate_quadlet() {
     if cpu_limit:
         lines.append("PodmanArgs=--cpus " + cpu_limit)
 
+    # Cgroups mode
+    cgroups = d.getVar('CONTAINER_CGROUPS')
+    if cgroups:
+        lines.append("PodmanArgs=--cgroups " + cgroups)
+
+    # SD-Notify mode
+    sdnotify = d.getVar('CONTAINER_SDNOTIFY')
+    if sdnotify:
+        lines.append("Notify=" + ("true" if sdnotify == "container" else "false"))
+        if sdnotify != "conmon":
+            lines.append("PodmanArgs=--sdnotify " + sdnotify)
+
+    # Timezone
+    timezone = d.getVar('CONTAINER_TIMEZONE')
+    if timezone:
+        lines.append("Timezone=" + timezone)
+
+    # Health check options
+    health_cmd = d.getVar('CONTAINER_HEALTH_CMD')
+    if health_cmd:
+        lines.append("HealthCmd=" + health_cmd)
+
+    health_interval = d.getVar('CONTAINER_HEALTH_INTERVAL')
+    if health_interval:
+        lines.append("HealthInterval=" + health_interval)
+
+    health_timeout = d.getVar('CONTAINER_HEALTH_TIMEOUT')
+    if health_timeout:
+        lines.append("HealthTimeout=" + health_timeout)
+
+    health_retries = d.getVar('CONTAINER_HEALTH_RETRIES')
+    if health_retries:
+        lines.append("HealthRetries=" + health_retries)
+
+    health_start_period = d.getVar('CONTAINER_HEALTH_START_PERIOD')
+    if health_start_period:
+        lines.append("HealthStartPeriod=" + health_start_period)
+
+    # Log driver
+    log_driver = d.getVar('CONTAINER_LOG_DRIVER')
+    if log_driver:
+        lines.append("LogDriver=" + log_driver)
+
+    # Log options
+    log_opt = d.getVar('CONTAINER_LOG_OPT')
+    if log_opt:
+        for opt in log_opt.split():
+            if '=' in opt:
+                lines.append("PodmanArgs=--log-opt " + opt)
+
+    # Ulimits
+    ulimits = d.getVar('CONTAINER_ULIMITS')
+    if ulimits:
+        for ulimit in ulimits.split():
+            lines.append("Ulimit=" + ulimit)
+
     lines.append("")
 
     # [Service] section
@@ -243,6 +323,12 @@ python do_generate_quadlet() {
     restart = d.getVar('CONTAINER_RESTART') or 'always'
     lines.append("Restart=" + restart)
     lines.append("TimeoutStartSec=900")
+
+    # Stop timeout
+    stop_timeout = d.getVar('CONTAINER_STOP_TIMEOUT')
+    if stop_timeout:
+        lines.append("TimeoutStopSec=" + stop_timeout)
+
     lines.append("")
 
     # [Install] section

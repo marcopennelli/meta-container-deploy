@@ -73,6 +73,18 @@
 #   registry.auth_secret  - Path to registry auth file
 #   pod                   - Pod name to join (makes container a pod member)
 #   verify                - Pre-pull verification: true to enable (default: false)
+#   cgroups               - Cgroups mode: enabled, disabled, no-conmon, split
+#   sdnotify              - SD-Notify mode: conmon, container, healthy, ignore
+#   timezone              - Container timezone (e.g., UTC, Europe/Rome, local)
+#   stop_timeout          - Seconds to wait before force-killing (default: 10)
+#   health_cmd            - Health check command
+#   health_interval       - Interval between health checks (e.g., 30s)
+#   health_timeout        - Timeout for health check (e.g., 10s)
+#   health_retries        - Consecutive failures before unhealthy
+#   health_start_period   - Initialization time before checks count
+#   log_driver            - Log driver: journald, k8s-file, none, passthrough
+#   log_opt               - Dict of log driver options
+#   ulimits               - Dict of ulimits (e.g., {"nofile": "65536:65536"})
 #
 # Global verification option (in local.conf):
 #   CONTAINERS_VERIFY - Enable pre-pull verification for all containers ("1" to enable)
@@ -719,6 +731,69 @@ python do_generate_quadlets() {
         if cpu_limit:
             lines.append("PodmanArgs=--cpus " + str(cpu_limit))
 
+        # Cgroups mode
+        cgroups = container.get('cgroups', '')
+        if cgroups:
+            lines.append("PodmanArgs=--cgroups " + cgroups)
+
+        # SD-Notify mode
+        sdnotify = container.get('sdnotify', '')
+        if sdnotify:
+            lines.append("Notify=" + ("true" if sdnotify == "container" else "false"))
+            if sdnotify != "conmon":
+                lines.append("PodmanArgs=--sdnotify " + sdnotify)
+
+        # Timezone
+        timezone = container.get('timezone', '')
+        if timezone:
+            lines.append("Timezone=" + timezone)
+
+        # Health check options
+        health_cmd = container.get('health_cmd', '')
+        if health_cmd:
+            lines.append("HealthCmd=" + health_cmd)
+
+        health_interval = container.get('health_interval', '')
+        if health_interval:
+            lines.append("HealthInterval=" + health_interval)
+
+        health_timeout = container.get('health_timeout', '')
+        if health_timeout:
+            lines.append("HealthTimeout=" + health_timeout)
+
+        health_retries = container.get('health_retries', '')
+        if health_retries:
+            lines.append("HealthRetries=" + str(health_retries))
+
+        health_start_period = container.get('health_start_period', '')
+        if health_start_period:
+            lines.append("HealthStartPeriod=" + health_start_period)
+
+        # Log driver
+        log_driver = container.get('log_driver', '')
+        if log_driver:
+            lines.append("LogDriver=" + log_driver)
+
+        # Log options
+        log_opt = container.get('log_opt', {})
+        if log_opt:
+            if isinstance(log_opt, dict):
+                for key, value in log_opt.items():
+                    lines.append(f"PodmanArgs=--log-opt {key}={value}")
+            elif isinstance(log_opt, list):
+                for opt in log_opt:
+                    lines.append("PodmanArgs=--log-opt " + opt)
+
+        # Ulimits
+        ulimits = container.get('ulimits', {})
+        if ulimits:
+            if isinstance(ulimits, dict):
+                for key, value in ulimits.items():
+                    lines.append(f"Ulimit={key}={value}")
+            elif isinstance(ulimits, list):
+                for ulimit in ulimits:
+                    lines.append("Ulimit=" + ulimit)
+
         lines.append("")
 
         # [Service] section
@@ -726,6 +801,12 @@ python do_generate_quadlets() {
         restart = container.get('restart_policy', 'always')
         lines.append("Restart=" + restart)
         lines.append("TimeoutStartSec=900")
+
+        # Stop timeout
+        stop_timeout = container.get('stop_timeout', '')
+        if stop_timeout:
+            lines.append("TimeoutStopSec=" + str(stop_timeout))
+
         lines.append("")
 
         # [Install] section
