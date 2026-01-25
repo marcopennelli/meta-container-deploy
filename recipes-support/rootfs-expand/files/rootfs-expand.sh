@@ -58,14 +58,25 @@ esac
 log_info "Root device: $ROOT_DEV, partition number: $PART_NUM"
 
 # Get current and max partition sizes
-CURRENT_SIZE=$(lsblk -b -n -o SIZE "$ROOT_PART" 2>/dev/null || echo "0")
-DEVICE_SIZE=$(lsblk -b -n -o SIZE "$ROOT_DEV" 2>/dev/null || echo "0")
+# Use tr to remove any whitespace/newlines from lsblk output
+CURRENT_SIZE=$(lsblk -b -n -o SIZE "$ROOT_PART" 2>/dev/null | tr -d '[:space:]')
+DEVICE_SIZE=$(lsblk -b -n -o SIZE "$ROOT_DEV" 2>/dev/null | tr -d '[:space:]')
+
+# Ensure we have valid numbers, default to 0 if empty
+CURRENT_SIZE=${CURRENT_SIZE:-0}
+DEVICE_SIZE=${DEVICE_SIZE:-0}
 
 log_info "Current partition size: $CURRENT_SIZE bytes"
 log_info "Device size: $DEVICE_SIZE bytes"
 
 # Check if expansion is needed (leave 10% margin)
 # Use shell arithmetic instead of bc for portability
+# Ensure DEVICE_SIZE is non-zero to avoid division issues
+if [ "$DEVICE_SIZE" -eq 0 ] 2>/dev/null; then
+    log_error "Could not determine device size"
+    exit 1
+fi
+
 THRESHOLD=$((DEVICE_SIZE * 9 / 10))
 if [ "$CURRENT_SIZE" -ge "$THRESHOLD" ] 2>/dev/null; then
     log_info "Partition already at maximum size, no expansion needed"
