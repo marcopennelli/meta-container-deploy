@@ -70,7 +70,9 @@
 #   command               - Command arguments
 #   pull_policy           - Pull policy: always, missing, never (default: missing)
 #   digest                - Pin to specific image digest for reproducibility
-#   registry.auth_secret  - Path to registry auth file
+#   registry.auth_secret  - Path to registry auth file (Docker/Podman config.json format)
+#   registry.tls_verify   - TLS certificate verification: true (default) or false
+#   registry.cert_dir     - Path to directory with custom CA certificates
 #   pod                   - Pod name to join (makes container a pod member)
 #   verify                - Pre-pull verification: true to enable (default: false)
 #   cgroups               - Cgroups mode: enabled, disabled, no-conmon, split
@@ -466,6 +468,7 @@ def verify_oci_image(oci_dir, container_name, full_image, d):
 
 # Optional pre-pull verification using skopeo inspect
 # Enable with CONTAINERS_VERIFY = "1" or per-container verify: true in manifest
+# Supports private registries with authentication and custom TLS settings
 python do_verify_containers() {
     import subprocess
     import os
@@ -490,8 +493,10 @@ python do_verify_containers() {
 
         image = container.get('image', '')
         digest = container.get('digest', '')
-        registry = container.get('registry', {})
-        auth_file = registry.get('auth_secret', '') if registry else ''
+        registry = container.get('registry', {}) or {}
+        auth_file = registry.get('auth_secret', '')
+        tls_verify = registry.get('tls_verify', True)
+        cert_dir = registry.get('cert_dir', '')
 
         # Determine full image reference
         if digest:
@@ -505,23 +510,56 @@ python do_verify_containers() {
         # Build skopeo inspect command
         skopeo_args = ['skopeo', 'inspect', '--override-arch', oci_arch]
 
-        if auth_file and os.path.exists(auth_file):
-            skopeo_args.extend(['--authfile', auth_file])
+        # Authentication for private registries
+        if auth_file:
+            if os.path.exists(auth_file):
+                skopeo_args.extend(['--authfile', auth_file])
+                bb.note(f"Using auth file: {auth_file}")
+            else:
+                bb.warn(f"Auth file specified but not found: {auth_file}")
+
+        # TLS options for private registries with self-signed certificates
+        if tls_verify is False or str(tls_verify).lower() == 'false':
+            skopeo_args.append('--tls-verify=false')
+            bb.warn(f"TLS verification disabled for '{container_name}' - use only for testing")
+
+        if cert_dir and os.path.isdir(cert_dir):
+            skopeo_args.extend(['--cert-dir', cert_dir])
+            bb.note(f"Using certificate directory: {cert_dir}")
 
         skopeo_args.append(f"docker://{full_image}")
 
+        bb.note(f"Running: {' '.join(skopeo_args)}")
+
         try:
-            subprocess.run(skopeo_args, check=True)
+            result = subprocess.run(skopeo_args, check=True, capture_output=True, text=True)
             bb.note(f"Container image '{container_name}' verified: {full_image}")
         except subprocess.CalledProcessError as e:
-            bb.fatal(f"Container image verification failed for '{container_name}' ({full_image}). "
-                     f"Image may not exist, wrong architecture, or authentication required.")
+            error_msg = e.stderr if e.stderr else str(e)
+            # Provide more specific error messages based on the error
+            if 'unauthorized' in error_msg.lower() or 'authentication required' in error_msg.lower():
+                if auth_file:
+                    bb.fatal(f"Container image verification failed for '{container_name}' ({full_image}): "
+                             f"Authentication failed. Check that the auth file '{auth_file}' contains valid credentials.")
+                else:
+                    bb.fatal(f"Container image verification failed for '{container_name}' ({full_image}): "
+                             f"Authentication required. Add 'registry.auth_secret' to the container configuration.")
+            elif 'certificate' in error_msg.lower() or 'x509' in error_msg.lower():
+                bb.fatal(f"Container image verification failed for '{container_name}' ({full_image}): "
+                         f"TLS certificate error. Use 'registry.tls_verify: false' for self-signed certs "
+                         f"or 'registry.cert_dir' to specify custom CA certificates.")
+            elif 'manifest unknown' in error_msg.lower() or 'not found' in error_msg.lower():
+                bb.fatal(f"Container image verification failed for '{container_name}' ({full_image}): "
+                         f"Image or tag not found in registry.")
+            else:
+                bb.fatal(f"Container image verification failed for '{container_name}' ({full_image}): {error_msg}")
 }
 addtask do_verify_containers after do_configure before do_pull_containers
 do_verify_containers[network] = "1"
 do_verify_containers[vardeps] = "CONTAINER_MANIFEST CONTAINERS_VERIFY"
 
 # Pull all container images using skopeo-native
+# Supports private registries with authentication and custom TLS settings
 python do_pull_containers() {
     import subprocess
     import os
@@ -543,8 +581,10 @@ python do_pull_containers() {
         container_name = container.get('name', '')
         image = container.get('image', '')
         digest = container.get('digest', '')
-        registry = container.get('registry', {})
-        auth_file = registry.get('auth_secret', '') if registry else ''
+        registry = container.get('registry', {}) or {}
+        auth_file = registry.get('auth_secret', '')
+        tls_verify = registry.get('tls_verify', True)
+        cert_dir = registry.get('cert_dir', '')
 
         # Determine full image reference
         if digest:
@@ -563,9 +603,22 @@ python do_pull_containers() {
         # Build skopeo command
         skopeo_args = ['skopeo', 'copy', '--override-arch', oci_arch]
 
-        if auth_file and os.path.exists(auth_file):
-            skopeo_args.extend(['--authfile', auth_file])
-            bb.note(f"Using auth file: {auth_file}")
+        # Authentication for private registries
+        if auth_file:
+            if os.path.exists(auth_file):
+                skopeo_args.extend(['--authfile', auth_file])
+                bb.note(f"Using auth file: {auth_file}")
+            else:
+                bb.warn(f"Auth file specified but not found: {auth_file}")
+
+        # TLS options for private registries with self-signed certificates
+        if tls_verify is False or str(tls_verify).lower() == 'false':
+            skopeo_args.append('--src-tls-verify=false')
+            bb.warn(f"TLS verification disabled for '{container_name}' - use only for testing")
+
+        if cert_dir and os.path.isdir(cert_dir):
+            skopeo_args.extend(['--src-cert-dir', cert_dir])
+            bb.note(f"Using certificate directory: {cert_dir}")
 
         # Add source and destination
         skopeo_args.append(f"docker://{full_image}")
@@ -575,10 +628,27 @@ python do_pull_containers() {
 
         # Run skopeo
         try:
-            subprocess.run(skopeo_args, check=True)
+            result = subprocess.run(skopeo_args, check=True, capture_output=True, text=True)
             bb.note(f"Container image '{container_name}' pulled successfully")
         except subprocess.CalledProcessError as e:
-            bb.fatal(f"Failed to pull container image '{container_name}' ({full_image})")
+            error_msg = e.stderr if e.stderr else str(e)
+            # Provide more specific error messages based on the error
+            if 'unauthorized' in error_msg.lower() or 'authentication required' in error_msg.lower():
+                if auth_file:
+                    bb.fatal(f"Failed to pull container image '{container_name}' ({full_image}): "
+                             f"Authentication failed. Check that the auth file '{auth_file}' contains valid credentials.")
+                else:
+                    bb.fatal(f"Failed to pull container image '{container_name}' ({full_image}): "
+                             f"Authentication required. Add 'registry.auth_secret' to the container configuration.")
+            elif 'certificate' in error_msg.lower() or 'x509' in error_msg.lower():
+                bb.fatal(f"Failed to pull container image '{container_name}' ({full_image}): "
+                         f"TLS certificate error. Use 'registry.tls_verify: false' for self-signed certs "
+                         f"or 'registry.cert_dir' to specify custom CA certificates.")
+            elif 'manifest unknown' in error_msg.lower() or 'not found' in error_msg.lower():
+                bb.fatal(f"Failed to pull container image '{container_name}' ({full_image}): "
+                         f"Image or tag not found in registry.")
+            else:
+                bb.fatal(f"Failed to pull container image '{container_name}' ({full_image}): {error_msg}")
 
         # Post-pull verification (default behavior)
         verify_oci_image(oci_dir, container_name, full_image, d)
