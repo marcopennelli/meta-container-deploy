@@ -27,7 +27,7 @@ This enables reproducible, air-gapped container deployments for embedded Linux s
 - **Podman Quadlet integration** - Modern declarative systemd container management
 - **Pod support** - Group containers into pods for shared network namespace and atomic lifecycle
 - **Architecture mapping** - Automatic TARGET_ARCH to OCI architecture conversion
-- **Private registry support** - Authentication via Docker config.json
+- **Private registry support** - Authentication via Docker config.json, custom TLS certificates
 - **Dependency management** - Container service ordering via systemd dependencies
 - **Security options** - Capabilities, security labels, read-only rootfs support
 - **Image verification** - Post-pull OCI structure validation (default) and optional pre-pull registry checks
@@ -543,6 +543,8 @@ Pulls container images at build time using skopeo-native.
 | `CONTAINER_DIGEST` | Pin to specific digest | - |
 | `CONTAINER_ARCH` | Override target architecture | auto-detected |
 | `CONTAINER_VERIFY` | Pre-pull verification ("1" to enable) | `0` |
+| `CONTAINER_TLS_VERIFY` | TLS certificate verification ("0" to disable) | `1` |
+| `CONTAINER_CERT_DIR` | Path to directory with custom CA certificates | - |
 
 ### container-quadlet.bbclass
 
@@ -623,6 +625,9 @@ Enables container configuration via `local.conf` variables (Method 2). Used by `
 | `CONTAINER_<name>_DEPENDS_ON` | Space-separated container dependencies |
 | `CONTAINER_<name>_POD` | Pod name to join |
 | `CONTAINER_<name>_VERIFY` | Pre-pull verification ("1" to enable) |
+| `CONTAINER_<name>_AUTH_FILE` | Path to registry auth file (Docker config.json format) |
+| `CONTAINER_<name>_TLS_VERIFY` | TLS certificate verification ("0" to disable) |
+| `CONTAINER_<name>_CERT_DIR` | Path to directory with custom CA certificates |
 | `CONTAINER_<name>_CGROUPS` | Cgroups mode: enabled, disabled, no-conmon, split |
 | `CONTAINER_<name>_SDNOTIFY` | SD-Notify mode: conmon, container, healthy, ignore |
 | `CONTAINER_<name>_TIMEZONE` | Container timezone (e.g., UTC, Europe/Rome, local) |
@@ -723,8 +728,9 @@ containers:
     labels:
       key: value
     registry:                   # Private registry config
-      url: <string>
-      auth_secret: <string>     # Reference to auth file
+      auth_secret: <string>     # Path to auth file (Docker config.json format)
+      tls_verify: <bool>        # TLS certificate verification (default: true)
+      cert_dir: <string>        # Path to directory with custom CA certificates
     verify: <bool>              # Pre-pull verification (default: false)
     cgroups: <string>           # Cgroups mode: enabled, disabled, no-conmon, split
     sdnotify: <string>          # SD-Notify mode: conmon, container, healthy, ignore
