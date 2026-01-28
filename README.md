@@ -6,6 +6,10 @@
 
 Yocto/OpenEmbedded layer for declarative Podman container support with build-time image pulling and systemd Quadlet integration.
 
+> **⚠️ Disclaimer**
+>
+> This layer is provided **as-is** and is under active development. Expect frequent changes, breaking updates, and evolving APIs. While the code is functional and tested, it is not yet intended for production use. Use at your own risk.
+
 ## Overview
 
 meta-container-deploy provides BitBake classes and recipes to:
