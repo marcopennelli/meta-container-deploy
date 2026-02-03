@@ -503,3 +503,14 @@ FILES:${PN}:append = " \
 
 # Ensure runtime dependencies
 RDEPENDS:${PN} += "container-import"
+
+# Deploy container-digests.json to DEPLOYDIR for external tooling/provenance
+do_deploy() {
+    if [ -f "${WORKDIR}/container-digests.json" ]; then
+        install -d ${DEPLOYDIR}
+        install -m 0644 ${WORKDIR}/container-digests.json ${DEPLOYDIR}/
+        bbnote "Deployed container-digests.json to ${DEPLOYDIR}"
+    fi
+}
+addtask do_deploy after do_install before do_build
+do_deploy[dirs] = "${DEPLOYDIR}"
