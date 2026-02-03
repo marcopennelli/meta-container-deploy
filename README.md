@@ -882,7 +882,12 @@ Pre-pull verification uses `skopeo inspect` to check the registry. If the image 
 
 ## SBOM and Provenance Support
 
-Container image digests are automatically resolved at build time for Software Bill of Materials (SBOM) generation and build provenance tracking.
+Container image digests are automatically resolved at build time for Software Bill of Materials (SBOM) generation and build provenance tracking. This feature works with all four configuration methods:
+
+- **Method 1**: Direct recipe (`container-image.bbclass`)
+- **Method 2**: local.conf variables (`container-localconf.bbclass`)
+- **Method 3**: Manifest-based (`container-manifest.bbclass`)
+- **Method 4**: Packagegroup (uses Method 1 recipes)
 
 ### Digest Resolution
 
