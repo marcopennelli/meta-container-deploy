@@ -2,6 +2,9 @@
 #
 # container-image.bbclass - Pull container images at build time using skopeo
 #
+# Inherit deploy class for DEPLOYDIR support
+inherit deploy
+#
 # This class provides functionality to pull OCI container images during the
 # BitBake build process using skopeo-native. Images are stored in OCI format
 # and can be imported into Podman storage at first boot.

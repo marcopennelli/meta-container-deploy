@@ -2,6 +2,9 @@
 #
 # container-localconf.bbclass - Configure containers via local.conf variables
 #
+# Inherit deploy class for DEPLOYDIR support
+inherit deploy
+#
 # This class enables container configuration directly in local.conf without
 # requiring individual recipe files. It's designed for dynamic container
 # provisioning systems like Fucinas that generate local.conf at build time.

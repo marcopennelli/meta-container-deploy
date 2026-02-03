@@ -2,6 +2,9 @@
 #
 # container-manifest.bbclass - Parse YAML/JSON container manifests
 #
+# Inherit deploy class for DEPLOYDIR support
+inherit deploy
+#
 # This class parses a container manifest file (YAML or JSON) and pulls
 # container images at build time, generating Quadlet files for systemd
 # service management. Designed for declarative container deployment in
