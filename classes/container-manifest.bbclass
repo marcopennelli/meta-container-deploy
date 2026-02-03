@@ -70,12 +70,41 @@
 #   command               - Command arguments
 #   pull_policy           - Pull policy: always, missing, never (default: missing)
 #   digest                - Pin to specific image digest for reproducibility
-#   registry.auth_secret  - Path to registry auth file
+#   registry.auth_secret  - Path to registry auth file (Docker/Podman config.json format)
+#   registry.tls_verify   - TLS certificate verification: true (default) or false
+#   registry.cert_dir     - Path to directory with custom CA certificates
 #   pod                   - Pod name to join (makes container a pod member)
 #   verify                - Pre-pull verification: true to enable (default: false)
+#   cgroups               - Cgroups mode: enabled, disabled, no-conmon, split
+#   sdnotify              - SD-Notify mode: conmon, container, healthy, ignore
+#   timezone              - Container timezone (e.g., UTC, Europe/Rome, local)
+#   stop_timeout          - Seconds to wait before force-killing (default: 10)
+#   health_cmd            - Health check command
+#   health_interval       - Interval between health checks (e.g., 30s)
+#   health_timeout        - Timeout for health check (e.g., 10s)
+#   health_retries        - Consecutive failures before unhealthy
+#   health_start_period   - Initialization time before checks count
+#   log_driver            - Log driver: journald, k8s-file, none, passthrough
+#   log_opt               - Dict of log driver options
+#   ulimits               - Dict of ulimits (e.g., {"nofile": "65536:65536"})
 #
 # Global verification option (in local.conf):
 #   CONTAINERS_VERIFY - Enable pre-pull verification for all containers ("1" to enable)
+#
+# SBOM/Provenance support:
+#   Container image digests are automatically resolved at build time and written to:
+#     /usr/share/containers/container-digests.json
+#
+#   This manifest includes for each container:
+#     - Original image reference (tag)
+#     - Resolved SHA256 digest
+#     - Build timestamp
+#     - OCI labels (title, version, revision, source, licenses)
+#
+#   Use this file for:
+#     - Software Bill of Materials (SBOM) generation
+#     - Build provenance/reproducibility tracking
+#     - Vulnerability scanning with pinned digests
 #
 # Pod manifest format:
 #   pods:
@@ -454,9 +483,13 @@ def verify_oci_image(oci_dir, container_name, full_image, d):
 
 # Optional pre-pull verification using skopeo inspect
 # Enable with CONTAINERS_VERIFY = "1" or per-container verify: true in manifest
+# Supports private registries with authentication and custom TLS settings
+# Also resolves tags to digests for SBOM/provenance tracking
 python do_verify_containers() {
     import subprocess
     import os
+    import json
+    from datetime import datetime
 
     manifest_path = d.getVar('CONTAINER_MANIFEST')
     if not manifest_path:
@@ -468,6 +501,14 @@ python do_verify_containers() {
 
     global_verify = d.getVar('CONTAINERS_VERIFY') == '1'
     oci_arch = get_oci_arch(d)
+    workdir = d.getVar('WORKDIR')
+
+    # Initialize resolved digests manifest for SBOM/provenance
+    resolved_manifest = {
+        'build_time': datetime.utcnow().isoformat() + 'Z',
+        'architecture': oci_arch,
+        'containers': []
+    }
 
     for container in containers:
         container_name = container.get('name', '')
@@ -478,8 +519,10 @@ python do_verify_containers() {
 
         image = container.get('image', '')
         digest = container.get('digest', '')
-        registry = container.get('registry', {})
-        auth_file = registry.get('auth_secret', '') if registry else ''
+        registry = container.get('registry', {}) or {}
+        auth_file = registry.get('auth_secret', '')
+        tls_verify = registry.get('tls_verify', True)
+        cert_dir = registry.get('cert_dir', '')
 
         # Determine full image reference
         if digest:
@@ -493,26 +536,110 @@ python do_verify_containers() {
         # Build skopeo inspect command
         skopeo_args = ['skopeo', 'inspect', '--override-arch', oci_arch]
 
-        if auth_file and os.path.exists(auth_file):
-            skopeo_args.extend(['--authfile', auth_file])
+        # Authentication for private registries
+        if auth_file:
+            if os.path.exists(auth_file):
+                skopeo_args.extend(['--authfile', auth_file])
+                bb.note(f"Using auth file: {auth_file}")
+            else:
+                bb.warn(f"Auth file specified but not found: {auth_file}")
+
+        # TLS options for private registries with self-signed certificates
+        if tls_verify is False or str(tls_verify).lower() == 'false':
+            skopeo_args.append('--tls-verify=false')
+            bb.warn(f"TLS verification disabled for '{container_name}' - use only for testing")
+
+        if cert_dir and os.path.isdir(cert_dir):
+            skopeo_args.extend(['--cert-dir', cert_dir])
+            bb.note(f"Using certificate directory: {cert_dir}")
 
         skopeo_args.append(f"docker://{full_image}")
 
+        bb.note(f"Running: {' '.join(skopeo_args)}")
+
         try:
-            subprocess.run(skopeo_args, check=True)
+            result = subprocess.run(skopeo_args, check=True, capture_output=True, text=True)
+
+            # Parse the inspect output to extract digest for SBOM
+            try:
+                inspect_data = json.loads(result.stdout)
+                resolved_digest = inspect_data.get('Digest', '')
+                image_name = inspect_data.get('Name', image.split(':')[0])
+                repo_tags = inspect_data.get('RepoTags', [])
+                created = inspect_data.get('Created', '')
+                labels = inspect_data.get('Labels', {})
+
+                # Extract tag from original image reference
+                original_tag = image.split(':')[-1] if ':' in image and '@' not in image else 'latest'
+
+                # Store resolved info for SBOM
+                container_info = {
+                    'name': container_name,
+                    'image': image,
+                    'resolved_digest': resolved_digest,
+                    'resolved_image': f"{image_name}@{resolved_digest}" if resolved_digest else full_image,
+                    'original_tag': original_tag,
+                    'available_tags': repo_tags[:10] if repo_tags else [],  # Limit to 10 tags
+                    'created': created,
+                    'labels': {
+                        'title': labels.get('org.opencontainers.image.title', ''),
+                        'version': labels.get('org.opencontainers.image.version', ''),
+                        'revision': labels.get('org.opencontainers.image.revision', ''),
+                        'source': labels.get('org.opencontainers.image.source', ''),
+                        'licenses': labels.get('org.opencontainers.image.licenses', ''),
+                    }
+                }
+                resolved_manifest['containers'].append(container_info)
+
+                if resolved_digest:
+                    bb.note(f"Container image '{container_name}' resolved: {original_tag} -> {resolved_digest}")
+                else:
+                    bb.warn(f"Could not resolve digest for '{container_name}'")
+
+            except json.JSONDecodeError:
+                bb.warn(f"Could not parse skopeo inspect output for '{container_name}'")
+
             bb.note(f"Container image '{container_name}' verified: {full_image}")
         except subprocess.CalledProcessError as e:
-            bb.fatal(f"Container image verification failed for '{container_name}' ({full_image}). "
-                     f"Image may not exist, wrong architecture, or authentication required.")
+            error_msg = e.stderr if e.stderr else str(e)
+            # Provide more specific error messages based on the error
+            if 'unauthorized' in error_msg.lower() or 'authentication required' in error_msg.lower():
+                if auth_file:
+                    bb.fatal(f"Container image verification failed for '{container_name}' ({full_image}): "
+                             f"Authentication failed. Check that the auth file '{auth_file}' contains valid credentials.")
+                else:
+                    bb.fatal(f"Container image verification failed for '{container_name}' ({full_image}): "
+                             f"Authentication required. Add 'registry.auth_secret' to the container configuration.")
+            elif 'certificate' in error_msg.lower() or 'x509' in error_msg.lower():
+                bb.fatal(f"Container image verification failed for '{container_name}' ({full_image}): "
+                         f"TLS certificate error. Use 'registry.tls_verify: false' for self-signed certs "
+                         f"or 'registry.cert_dir' to specify custom CA certificates.")
+            elif 'manifest unknown' in error_msg.lower() or 'not found' in error_msg.lower():
+                bb.fatal(f"Container image verification failed for '{container_name}' ({full_image}): "
+                         f"Image or tag not found in registry.")
+            else:
+                bb.fatal(f"Container image verification failed for '{container_name}' ({full_image}): {error_msg}")
+
+    # Write resolved digests manifest for SBOM/provenance
+    if resolved_manifest['containers']:
+        os.makedirs(workdir, exist_ok=True)
+        manifest_file = os.path.join(workdir, 'container-digests.json')
+        with open(manifest_file, 'w') as f:
+            json.dump(resolved_manifest, f, indent=2)
+        bb.note(f"Wrote resolved container digests to {manifest_file}")
 }
 addtask do_verify_containers after do_configure before do_pull_containers
 do_verify_containers[network] = "1"
 do_verify_containers[vardeps] = "CONTAINER_MANIFEST CONTAINERS_VERIFY"
 
 # Pull all container images using skopeo-native
+# Supports private registries with authentication and custom TLS settings
+# Also resolves digests for SBOM/provenance tracking
 python do_pull_containers() {
     import subprocess
     import os
+    import json
+    from datetime import datetime
 
     manifest_path = d.getVar('CONTAINER_MANIFEST')
     if not manifest_path:
@@ -526,13 +653,32 @@ python do_pull_containers() {
 
     workdir = d.getVar('WORKDIR')
     oci_arch = get_oci_arch(d)
+    global_verify = d.getVar('CONTAINERS_VERIFY') == '1'
+
+    # Load existing digest manifest from verification phase, or create new one
+    manifest_file = os.path.join(workdir, 'container-digests.json')
+    if os.path.exists(manifest_file):
+        with open(manifest_file, 'r') as f:
+            resolved_manifest = json.load(f)
+        bb.note(f"Loaded existing digest manifest with {len(resolved_manifest.get('containers', []))} containers")
+    else:
+        resolved_manifest = {
+            'build_time': datetime.utcnow().isoformat() + 'Z',
+            'architecture': oci_arch,
+            'containers': []
+        }
+
+    # Track which containers already have digest info from verification
+    verified_names = {c['name'] for c in resolved_manifest.get('containers', [])}
 
     for container in containers:
         container_name = container.get('name', '')
         image = container.get('image', '')
         digest = container.get('digest', '')
-        registry = container.get('registry', {})
-        auth_file = registry.get('auth_secret', '') if registry else ''
+        registry = container.get('registry', {}) or {}
+        auth_file = registry.get('auth_secret', '')
+        tls_verify = registry.get('tls_verify', True)
+        cert_dir = registry.get('cert_dir', '')
 
         # Determine full image reference
         if digest:
@@ -551,9 +697,22 @@ python do_pull_containers() {
         # Build skopeo command
         skopeo_args = ['skopeo', 'copy', '--override-arch', oci_arch]
 
-        if auth_file and os.path.exists(auth_file):
-            skopeo_args.extend(['--authfile', auth_file])
-            bb.note(f"Using auth file: {auth_file}")
+        # Authentication for private registries
+        if auth_file:
+            if os.path.exists(auth_file):
+                skopeo_args.extend(['--authfile', auth_file])
+                bb.note(f"Using auth file: {auth_file}")
+            else:
+                bb.warn(f"Auth file specified but not found: {auth_file}")
+
+        # TLS options for private registries with self-signed certificates
+        if tls_verify is False or str(tls_verify).lower() == 'false':
+            skopeo_args.append('--src-tls-verify=false')
+            bb.warn(f"TLS verification disabled for '{container_name}' - use only for testing")
+
+        if cert_dir and os.path.isdir(cert_dir):
+            skopeo_args.extend(['--src-cert-dir', cert_dir])
+            bb.note(f"Using certificate directory: {cert_dir}")
 
         # Add source and destination
         skopeo_args.append(f"docker://{full_image}")
@@ -563,13 +722,93 @@ python do_pull_containers() {
 
         # Run skopeo
         try:
-            subprocess.run(skopeo_args, check=True)
+            result = subprocess.run(skopeo_args, check=True, capture_output=True, text=True)
             bb.note(f"Container image '{container_name}' pulled successfully")
         except subprocess.CalledProcessError as e:
-            bb.fatal(f"Failed to pull container image '{container_name}' ({full_image})")
+            error_msg = e.stderr if e.stderr else str(e)
+            # Provide more specific error messages based on the error
+            if 'unauthorized' in error_msg.lower() or 'authentication required' in error_msg.lower():
+                if auth_file:
+                    bb.fatal(f"Failed to pull container image '{container_name}' ({full_image}): "
+                             f"Authentication failed. Check that the auth file '{auth_file}' contains valid credentials.")
+                else:
+                    bb.fatal(f"Failed to pull container image '{container_name}' ({full_image}): "
+                             f"Authentication required. Add 'registry.auth_secret' to the container configuration.")
+            elif 'certificate' in error_msg.lower() or 'x509' in error_msg.lower():
+                bb.fatal(f"Failed to pull container image '{container_name}' ({full_image}): "
+                         f"TLS certificate error. Use 'registry.tls_verify: false' for self-signed certs "
+                         f"or 'registry.cert_dir' to specify custom CA certificates.")
+            elif 'manifest unknown' in error_msg.lower() or 'not found' in error_msg.lower():
+                bb.fatal(f"Failed to pull container image '{container_name}' ({full_image}): "
+                         f"Image or tag not found in registry.")
+            else:
+                bb.fatal(f"Failed to pull container image '{container_name}' ({full_image}): {error_msg}")
 
         # Post-pull verification (default behavior)
         verify_oci_image(oci_dir, container_name, full_image, d)
+
+        # Resolve digest for containers not already verified (for SBOM/provenance)
+        container_verify = container.get('verify', False)
+        if container_name not in verified_names and not container_verify and not global_verify:
+            bb.note(f"Resolving digest for '{container_name}' (not pre-verified)")
+
+            # Build skopeo inspect command to get digest
+            inspect_args = ['skopeo', 'inspect', '--override-arch', oci_arch]
+
+            if auth_file and os.path.exists(auth_file):
+                inspect_args.extend(['--authfile', auth_file])
+
+            if tls_verify is False or str(tls_verify).lower() == 'false':
+                inspect_args.append('--tls-verify=false')
+
+            if cert_dir and os.path.isdir(cert_dir):
+                inspect_args.extend(['--cert-dir', cert_dir])
+
+            inspect_args.append(f"docker://{full_image}")
+
+            try:
+                inspect_result = subprocess.run(inspect_args, capture_output=True, text=True, check=True)
+                inspect_data = json.loads(inspect_result.stdout)
+
+                resolved_digest = inspect_data.get('Digest', '')
+                image_name = inspect_data.get('Name', image.split(':')[0])
+                repo_tags = inspect_data.get('RepoTags', [])
+                created = inspect_data.get('Created', '')
+                labels = inspect_data.get('Labels', {}) or {}
+
+                original_tag = image.split(':')[-1] if ':' in image and '@' not in image else 'latest'
+
+                container_info = {
+                    'name': container_name,
+                    'image': image,
+                    'resolved_digest': resolved_digest,
+                    'resolved_image': f"{image_name}@{resolved_digest}" if resolved_digest else full_image,
+                    'original_tag': original_tag,
+                    'available_tags': repo_tags[:10] if repo_tags else [],
+                    'created': created,
+                    'labels': {
+                        'title': labels.get('org.opencontainers.image.title', ''),
+                        'version': labels.get('org.opencontainers.image.version', ''),
+                        'revision': labels.get('org.opencontainers.image.revision', ''),
+                        'source': labels.get('org.opencontainers.image.source', ''),
+                        'licenses': labels.get('org.opencontainers.image.licenses', ''),
+                    }
+                }
+                resolved_manifest['containers'].append(container_info)
+
+                if resolved_digest:
+                    bb.note(f"Container '{container_name}' resolved: {original_tag} -> {resolved_digest}")
+                else:
+                    bb.warn(f"Could not resolve digest for '{container_name}'")
+
+            except (subprocess.CalledProcessError, json.JSONDecodeError) as e:
+                bb.warn(f"Could not resolve digest for '{container_name}': {e}")
+
+    # Write updated digest manifest for SBOM/provenance
+    if resolved_manifest['containers']:
+        with open(manifest_file, 'w') as f:
+            json.dump(resolved_manifest, f, indent=2)
+        bb.note(f"Wrote container digests manifest ({len(resolved_manifest['containers'])} containers) to {manifest_file}")
 }
 
 addtask do_pull_containers after do_verify_containers before do_compile
@@ -719,6 +958,69 @@ python do_generate_quadlets() {
         if cpu_limit:
             lines.append("PodmanArgs=--cpus " + str(cpu_limit))
 
+        # Cgroups mode
+        cgroups = container.get('cgroups', '')
+        if cgroups:
+            lines.append("PodmanArgs=--cgroups " + cgroups)
+
+        # SD-Notify mode
+        sdnotify = container.get('sdnotify', '')
+        if sdnotify:
+            lines.append("Notify=" + ("true" if sdnotify == "container" else "false"))
+            if sdnotify != "conmon":
+                lines.append("PodmanArgs=--sdnotify " + sdnotify)
+
+        # Timezone
+        timezone = container.get('timezone', '')
+        if timezone:
+            lines.append("Timezone=" + timezone)
+
+        # Health check options
+        health_cmd = container.get('health_cmd', '')
+        if health_cmd:
+            lines.append("HealthCmd=" + health_cmd)
+
+        health_interval = container.get('health_interval', '')
+        if health_interval:
+            lines.append("HealthInterval=" + health_interval)
+
+        health_timeout = container.get('health_timeout', '')
+        if health_timeout:
+            lines.append("HealthTimeout=" + health_timeout)
+
+        health_retries = container.get('health_retries', '')
+        if health_retries:
+            lines.append("HealthRetries=" + str(health_retries))
+
+        health_start_period = container.get('health_start_period', '')
+        if health_start_period:
+            lines.append("HealthStartPeriod=" + health_start_period)
+
+        # Log driver
+        log_driver = container.get('log_driver', '')
+        if log_driver:
+            lines.append("LogDriver=" + log_driver)
+
+        # Log options
+        log_opt = container.get('log_opt', {})
+        if log_opt:
+            if isinstance(log_opt, dict):
+                for key, value in log_opt.items():
+                    lines.append(f"PodmanArgs=--log-opt {key}={value}")
+            elif isinstance(log_opt, list):
+                for opt in log_opt:
+                    lines.append("PodmanArgs=--log-opt " + opt)
+
+        # Ulimits
+        ulimits = container.get('ulimits', {})
+        if ulimits:
+            if isinstance(ulimits, dict):
+                for key, value in ulimits.items():
+                    lines.append(f"Ulimit={key}={value}")
+            elif isinstance(ulimits, list):
+                for ulimit in ulimits:
+                    lines.append("Ulimit=" + ulimit)
+
         lines.append("")
 
         # [Service] section
@@ -726,6 +1028,12 @@ python do_generate_quadlets() {
         restart = container.get('restart_policy', 'always')
         lines.append("Restart=" + restart)
         lines.append("TimeoutStartSec=900")
+
+        # Stop timeout
+        stop_timeout = container.get('stop_timeout', '')
+        if stop_timeout:
+            lines.append("TimeoutStopSec=" + str(stop_timeout))
+
         lines.append("")
 
         # [Install] section
@@ -996,6 +1304,14 @@ do_install:append() {
 
     # Create import marker directory
     install -d ${D}${CONTAINER_IMPORT_MARKER_DIR}
+
+    # Install container digests manifest for SBOM/provenance
+    if [ -f "${WORKDIR}/container-digests.json" ]; then
+        install -d ${D}${datadir}/containers
+        install -m 0644 ${WORKDIR}/container-digests.json \
+            ${D}${datadir}/containers/
+        bbnote "Installed container digests manifest for SBOM/provenance"
+    fi
 }
 
 # Set FILES to include all container and pod artifacts
@@ -1006,6 +1322,7 @@ FILES:${PN} += "\
     ${QUADLET_DIR}/*.pod \
     ${sysconfdir}/containers/import.d/*.sh \
     ${CONTAINER_IMPORT_MARKER_DIR} \
+    ${datadir}/containers/container-digests.json \
 "
 
 # Disable automatic packaging of -dev, -dbg, -src, etc. since we only produce data files
