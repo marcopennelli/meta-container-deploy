@@ -297,9 +297,12 @@ def verify_oci_image(oci_dir, container_name, full_image, d):
 
 # Optional pre-pull verification using skopeo inspect
 # Enable with CONTAINERS_VERIFY = "1" or per-container CONTAINER_<name>_VERIFY = "1"
+# Also resolves tags to digests for SBOM/provenance tracking
 python do_verify_containers() {
     import subprocess
     import os
+    import json
+    from datetime import datetime
 
     containers = get_container_list(d)
     if not containers:
@@ -307,6 +310,14 @@ python do_verify_containers() {
 
     global_verify = d.getVar('CONTAINERS_VERIFY') == '1'
     oci_arch = get_oci_arch(d)
+    workdir = d.getVar('WORKDIR')
+
+    # Initialize resolved digests manifest for SBOM/provenance
+    resolved_manifest = {
+        'build_time': datetime.utcnow().isoformat() + 'Z',
+        'architecture': oci_arch,
+        'containers': []
+    }
 
     for container_name in containers:
         # Check per-container or global verify flag
@@ -355,6 +366,44 @@ python do_verify_containers() {
 
         try:
             result = subprocess.run(skopeo_args, check=True, capture_output=True, text=True)
+
+            # Parse the inspect output to extract digest for SBOM
+            try:
+                inspect_data = json.loads(result.stdout)
+                resolved_digest = inspect_data.get('Digest', '')
+                image_name = inspect_data.get('Name', image.split(':')[0])
+                repo_tags = inspect_data.get('RepoTags', [])
+                created = inspect_data.get('Created', '')
+                labels = inspect_data.get('Labels', {}) or {}
+
+                original_tag = image.split(':')[-1] if ':' in image and '@' not in image else 'latest'
+
+                container_info = {
+                    'name': container_name,
+                    'image': image,
+                    'resolved_digest': resolved_digest,
+                    'resolved_image': f"{image_name}@{resolved_digest}" if resolved_digest else full_image,
+                    'original_tag': original_tag,
+                    'available_tags': repo_tags[:10] if repo_tags else [],
+                    'created': created,
+                    'labels': {
+                        'title': labels.get('org.opencontainers.image.title', ''),
+                        'version': labels.get('org.opencontainers.image.version', ''),
+                        'revision': labels.get('org.opencontainers.image.revision', ''),
+                        'source': labels.get('org.opencontainers.image.source', ''),
+                        'licenses': labels.get('org.opencontainers.image.licenses', ''),
+                    }
+                }
+                resolved_manifest['containers'].append(container_info)
+
+                if resolved_digest:
+                    bb.note(f"Container image '{container_name}' resolved: {original_tag} -> {resolved_digest}")
+                else:
+                    bb.warn(f"Could not resolve digest for '{container_name}'")
+
+            except json.JSONDecodeError:
+                bb.warn(f"Could not parse skopeo inspect output for '{container_name}'")
+
             bb.note(f"Container image '{container_name}' verified: {full_image}")
         except subprocess.CalledProcessError as e:
             error_msg = e.stderr if e.stderr else str(e)
@@ -375,6 +424,14 @@ python do_verify_containers() {
                          f"Image or tag not found in registry.")
             else:
                 bb.fatal(f"Container image verification failed for '{container_name}' ({full_image}): {error_msg}")
+
+    # Write resolved digests manifest for SBOM/provenance
+    if resolved_manifest['containers']:
+        os.makedirs(workdir, exist_ok=True)
+        manifest_file = os.path.join(workdir, 'container-digests.json')
+        with open(manifest_file, 'w') as f:
+            json.dump(resolved_manifest, f, indent=2)
+        bb.note(f"Wrote resolved container digests to {manifest_file}")
 }
 addtask do_verify_containers after do_configure before do_pull_containers
 do_verify_containers[network] = "1"
@@ -382,9 +439,12 @@ do_verify_containers[vardeps] = "CONTAINERS CONTAINERS_VERIFY"
 
 # Pull all container images using skopeo-native
 # Supports private registries with authentication and custom TLS settings
+# Also resolves digests for SBOM/provenance tracking
 python do_pull_containers() {
     import subprocess
     import os
+    import json
+    from datetime import datetime
 
     containers = get_container_list(d)
     if not containers:
@@ -393,6 +453,23 @@ python do_pull_containers() {
 
     workdir = d.getVar('WORKDIR')
     oci_arch = get_oci_arch(d)
+    global_verify = d.getVar('CONTAINERS_VERIFY') == '1'
+
+    # Load existing digest manifest from verification phase, or create new one
+    manifest_file = os.path.join(workdir, 'container-digests.json')
+    if os.path.exists(manifest_file):
+        with open(manifest_file, 'r') as f:
+            resolved_manifest = json.load(f)
+        bb.note(f"Loaded existing digest manifest with {len(resolved_manifest.get('containers', []))} containers")
+    else:
+        resolved_manifest = {
+            'build_time': datetime.utcnow().isoformat() + 'Z',
+            'architecture': oci_arch,
+            'containers': []
+        }
+
+    # Track which containers already have digest info from verification
+    verified_names = {c['name'] for c in resolved_manifest.get('containers', [])}
 
     for container_name in containers:
         image = get_container_var(d, container_name, 'IMAGE')
@@ -467,6 +544,69 @@ python do_pull_containers() {
 
         # Post-pull verification (default behavior)
         verify_oci_image(oci_dir, container_name, full_image, d)
+
+        # Resolve digest for containers not already verified (for SBOM/provenance)
+        container_verify = get_container_var(d, container_name, 'VERIFY')
+        if container_name not in verified_names and container_verify != '1' and not global_verify:
+            bb.note(f"Resolving digest for '{container_name}' (not pre-verified)")
+
+            # Build skopeo inspect command to get digest
+            inspect_args = ['skopeo', 'inspect', '--override-arch', oci_arch]
+
+            if auth_file and os.path.exists(auth_file):
+                inspect_args.extend(['--authfile', auth_file])
+
+            if tls_verify == '0':
+                inspect_args.append('--tls-verify=false')
+
+            if cert_dir and os.path.isdir(cert_dir):
+                inspect_args.extend(['--cert-dir', cert_dir])
+
+            inspect_args.append(f"docker://{full_image}")
+
+            try:
+                inspect_result = subprocess.run(inspect_args, capture_output=True, text=True, check=True)
+                inspect_data = json.loads(inspect_result.stdout)
+
+                resolved_digest = inspect_data.get('Digest', '')
+                image_name = inspect_data.get('Name', image.split(':')[0])
+                repo_tags = inspect_data.get('RepoTags', [])
+                created = inspect_data.get('Created', '')
+                labels = inspect_data.get('Labels', {}) or {}
+
+                original_tag = image.split(':')[-1] if ':' in image and '@' not in image else 'latest'
+
+                container_info = {
+                    'name': container_name,
+                    'image': image,
+                    'resolved_digest': resolved_digest,
+                    'resolved_image': f"{image_name}@{resolved_digest}" if resolved_digest else full_image,
+                    'original_tag': original_tag,
+                    'available_tags': repo_tags[:10] if repo_tags else [],
+                    'created': created,
+                    'labels': {
+                        'title': labels.get('org.opencontainers.image.title', ''),
+                        'version': labels.get('org.opencontainers.image.version', ''),
+                        'revision': labels.get('org.opencontainers.image.revision', ''),
+                        'source': labels.get('org.opencontainers.image.source', ''),
+                        'licenses': labels.get('org.opencontainers.image.licenses', ''),
+                    }
+                }
+                resolved_manifest['containers'].append(container_info)
+
+                if resolved_digest:
+                    bb.note(f"Container '{container_name}' resolved: {original_tag} -> {resolved_digest}")
+                else:
+                    bb.warn(f"Could not resolve digest for '{container_name}'")
+
+            except (subprocess.CalledProcessError, json.JSONDecodeError) as e:
+                bb.warn(f"Could not resolve digest for '{container_name}': {e}")
+
+    # Write updated digest manifest for SBOM/provenance
+    if resolved_manifest['containers']:
+        with open(manifest_file, 'w') as f:
+            json.dump(resolved_manifest, f, indent=2)
+        bb.note(f"Wrote container digests manifest ({len(resolved_manifest['containers'])} containers) to {manifest_file}")
 }
 
 addtask do_pull_containers after do_verify_containers before do_compile
@@ -925,6 +1065,14 @@ do_install:append() {
 
     # Create import marker directory
     install -d ${D}${CONTAINER_IMPORT_MARKER_DIR}
+
+    # Install container digests manifest for SBOM/provenance
+    if [ -f "${WORKDIR}/container-digests.json" ]; then
+        install -d ${D}${datadir}/containers
+        install -m 0644 ${WORKDIR}/container-digests.json \
+            ${D}${datadir}/containers/
+        bbnote "Installed container digests manifest for SBOM/provenance"
+    fi
 }
 
 # Set FILES to include all container and pod artifacts
@@ -935,6 +1083,7 @@ FILES:${PN} += "\
     ${QUADLET_DIR}/*.pod \
     ${sysconfdir}/containers/import.d/*.sh \
     ${CONTAINER_IMPORT_MARKER_DIR} \
+    ${datadir}/containers/container-digests.json \
 "
 
 # Disable automatic packaging of -dev, -dbg, -src, etc. since we only produce data files
