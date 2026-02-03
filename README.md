@@ -829,6 +829,9 @@ Example container recipe (Method 1) deploying nginx:alpine for layer validation.
 └── import.d/                   # Per-container import scripts
     ├── nginx-server.sh
     └── mqtt-broker.sh
+
+/usr/share/containers/
+└── container-digests.json      # SBOM/provenance manifest
 ```
 
 ## Image Verification
@@ -877,15 +880,72 @@ CONTAINER_VERIFY = "1"
 
 Pre-pull verification uses `skopeo inspect` to check the registry. If the image doesn't exist, has wrong architecture, or requires authentication, the build fails immediately with a clear error message.
 
+## SBOM and Provenance Support
+
+Container image digests are automatically resolved at build time for Software Bill of Materials (SBOM) generation and build provenance tracking.
+
+### Digest Resolution
+
+When building, the layer automatically resolves image tags (like `alpine:3.18` or `nginx:latest`) to their immutable SHA256 digests. This information is written to:
+
+```
+/usr/share/containers/container-digests.json
+```
+
+### Manifest Format
+
+```json
+{
+  "build_time": "2026-02-03T12:34:56Z",
+  "architecture": "arm64",
+  "containers": [
+    {
+      "name": "mqtt-broker",
+      "image": "docker.io/eclipse-mosquitto:2.0",
+      "resolved_digest": "sha256:7782113f0df709a0f303d83752a22099dac0b996dccb0b0cf7af0b26ac952870",
+      "resolved_image": "docker.io/eclipse-mosquitto@sha256:7782113f0df...",
+      "original_tag": "2.0",
+      "available_tags": ["2.0", "2.0.18", "latest"],
+      "created": "2026-01-23T20:40:39Z",
+      "labels": {
+        "title": "Eclipse Mosquitto",
+        "version": "2.0.18",
+        "revision": "abc123def456",
+        "source": "https://github.com/eclipse/mosquitto",
+        "licenses": "EPL-2.0"
+      }
+    }
+  ]
+}
+```
+
+### Use Cases
+
+- **SBOM Generation**: Include exact container versions in your Software Bill of Materials
+- **Build Provenance**: Track exactly which image digests were used in each build
+- **Vulnerability Scanning**: Use pinned digests for accurate vulnerability assessment
+- **Reproducibility**: Reference resolved digests for reproducible builds
+- **Compliance**: Maintain audit trails of container image origins
+
+### OCI Labels
+
+The manifest extracts standard OCI labels when available:
+- `org.opencontainers.image.title` - Image title/name
+- `org.opencontainers.image.version` - Semantic version
+- `org.opencontainers.image.revision` - Git commit hash
+- `org.opencontainers.image.source` - Source repository URL
+- `org.opencontainers.image.licenses` - License identifier
+
 ## Build Sequence
 
 During `bitbake`, the following steps occur for container images:
 
-1. **Pre-pull verification** (optional) - `skopeo inspect` validates images exist in registry
+1. **Pre-pull verification** (optional) - `skopeo inspect` validates images exist in registry and resolves digests
 2. **Image pulling** - `skopeo copy` downloads images to OCI format in build directory
-3. **Post-pull verification** (default) - Validates OCI structure (oci-layout, index.json, blobs)
-4. **Quadlet generation** - Creates `.container` and `.pod` files from configuration
-5. **Rootfs installation** - OCI images and Quadlet files are installed to target rootfs
+3. **Digest resolution** - Resolves image tags to SHA256 digests for SBOM/provenance
+4. **Post-pull verification** (default) - Validates OCI structure (oci-layout, index.json, blobs)
+5. **Quadlet generation** - Creates `.container` and `.pod` files from configuration
+6. **Rootfs installation** - OCI images, Quadlet files, and digest manifest are installed to target rootfs
 
 ## Boot Sequence
 
