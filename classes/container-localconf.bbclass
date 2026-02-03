@@ -44,8 +44,23 @@
 #   COMMAND - Command arguments
 #   PULL_POLICY - Pull policy: always, missing, never (default: missing)
 #   DIGEST - Pin to specific digest for reproducibility
+#   AUTH_FILE - Path to registry auth file (Docker/Podman config.json format)
+#   TLS_VERIFY - TLS certificate verification: "1" (default) or "0" to disable
+#   CERT_DIR - Path to directory with custom CA certificates
 #   POD - Pod name to join (container becomes a pod member)
 #   VERIFY - Pre-pull verification: "1" to enable (default: "0")
+#   CGROUPS - Cgroups mode: enabled, disabled, no-conmon, split
+#   SDNOTIFY - SD-Notify mode: conmon, container, healthy, ignore
+#   TIMEZONE - Container timezone (e.g., UTC, Europe/Rome, local)
+#   STOP_TIMEOUT - Seconds to wait before force-killing (default: 10)
+#   HEALTH_CMD - Health check command
+#   HEALTH_INTERVAL - Interval between health checks (e.g., 30s)
+#   HEALTH_TIMEOUT - Timeout for health check (e.g., 10s)
+#   HEALTH_RETRIES - Consecutive failures before unhealthy
+#   HEALTH_START_PERIOD - Initialization time before checks count
+#   LOG_DRIVER - Log driver: journald, k8s-file, none, passthrough
+#   LOG_OPT - Space-separated log driver options (key=value)
+#   ULIMITS - Space-separated ulimits (e.g., nofile=65536:65536)
 #
 # Global verification option:
 #   CONTAINERS_VERIFY - Enable pre-pull verification for all containers ("1" to enable)
@@ -152,7 +167,7 @@ def get_pod_var(d, pod_name, var_name, default=''):
 CONTAINERS_VERIFY ?= "0"
 
 # All container configuration variable suffixes
-CONTAINER_VAR_SUFFIXES = "IMAGE PORTS VOLUMES ENVIRONMENT NETWORK RESTART USER WORKING_DIR DEVICES CAPS_ADD CAPS_DROP PRIVILEGED READ_ONLY MEMORY_LIMIT CPU_LIMIT ENABLED LABELS DEPENDS_ON ENTRYPOINT COMMAND PULL_POLICY DIGEST AUTH_FILE SECURITY_OPTS POD VERIFY"
+CONTAINER_VAR_SUFFIXES = "IMAGE PORTS VOLUMES ENVIRONMENT NETWORK RESTART USER WORKING_DIR DEVICES CAPS_ADD CAPS_DROP PRIVILEGED READ_ONLY MEMORY_LIMIT CPU_LIMIT ENABLED LABELS DEPENDS_ON ENTRYPOINT COMMAND PULL_POLICY DIGEST AUTH_FILE SECURITY_OPTS POD VERIFY CGROUPS SDNOTIFY TIMEZONE STOP_TIMEOUT HEALTH_CMD HEALTH_INTERVAL HEALTH_TIMEOUT HEALTH_RETRIES HEALTH_START_PERIOD LOG_DRIVER LOG_OPT ULIMITS"
 
 # All pod configuration variable suffixes
 POD_VAR_SUFFIXES = "PORTS NETWORK VOLUMES LABELS DNS DNS_SEARCH HOSTNAME IP MAC ADD_HOST USERNS ENABLED"
@@ -302,6 +317,8 @@ python do_verify_containers() {
         image = get_container_var(d, container_name, 'IMAGE')
         digest = get_container_var(d, container_name, 'DIGEST')
         auth_file = get_container_var(d, container_name, 'AUTH_FILE')
+        tls_verify = get_container_var(d, container_name, 'TLS_VERIFY')
+        cert_dir = get_container_var(d, container_name, 'CERT_DIR')
 
         # Determine full image reference
         if digest:
@@ -315,23 +332,56 @@ python do_verify_containers() {
         # Build skopeo inspect command
         skopeo_args = ['skopeo', 'inspect', '--override-arch', oci_arch]
 
-        if auth_file and os.path.exists(auth_file):
-            skopeo_args.extend(['--authfile', auth_file])
+        # Authentication for private registries
+        if auth_file:
+            if os.path.exists(auth_file):
+                skopeo_args.extend(['--authfile', auth_file])
+                bb.note(f"Using auth file: {auth_file}")
+            else:
+                bb.warn(f"Auth file specified but not found: {auth_file}")
+
+        # TLS options for private registries with self-signed certificates
+        if tls_verify == '0':
+            skopeo_args.append('--tls-verify=false')
+            bb.warn(f"TLS verification disabled for '{container_name}' - use only for testing")
+
+        if cert_dir and os.path.isdir(cert_dir):
+            skopeo_args.extend(['--cert-dir', cert_dir])
+            bb.note(f"Using certificate directory: {cert_dir}")
 
         skopeo_args.append(f"docker://{full_image}")
 
+        bb.note(f"Running: {' '.join(skopeo_args)}")
+
         try:
-            subprocess.run(skopeo_args, check=True)
+            result = subprocess.run(skopeo_args, check=True, capture_output=True, text=True)
             bb.note(f"Container image '{container_name}' verified: {full_image}")
         except subprocess.CalledProcessError as e:
-            bb.fatal(f"Container image verification failed for '{container_name}' ({full_image}). "
-                     f"Image may not exist, wrong architecture, or authentication required.")
+            error_msg = e.stderr if e.stderr else str(e)
+            # Provide more specific error messages based on the error
+            if 'unauthorized' in error_msg.lower() or 'authentication required' in error_msg.lower():
+                if auth_file:
+                    bb.fatal(f"Container image verification failed for '{container_name}' ({full_image}): "
+                             f"Authentication failed. Check that the auth file '{auth_file}' contains valid credentials.")
+                else:
+                    bb.fatal(f"Container image verification failed for '{container_name}' ({full_image}): "
+                             f"Authentication required. Add 'CONTAINER_{container_name}_AUTH_FILE' to your configuration.")
+            elif 'certificate' in error_msg.lower() or 'x509' in error_msg.lower():
+                bb.fatal(f"Container image verification failed for '{container_name}' ({full_image}): "
+                         f"TLS certificate error. Set 'CONTAINER_{container_name}_TLS_VERIFY = \"0\"' for self-signed certs "
+                         f"or 'CONTAINER_{container_name}_CERT_DIR' to specify custom CA certificates.")
+            elif 'manifest unknown' in error_msg.lower() or 'not found' in error_msg.lower():
+                bb.fatal(f"Container image verification failed for '{container_name}' ({full_image}): "
+                         f"Image or tag not found in registry.")
+            else:
+                bb.fatal(f"Container image verification failed for '{container_name}' ({full_image}): {error_msg}")
 }
 addtask do_verify_containers after do_configure before do_pull_containers
 do_verify_containers[network] = "1"
 do_verify_containers[vardeps] = "CONTAINERS CONTAINERS_VERIFY"
 
 # Pull all container images using skopeo-native
+# Supports private registries with authentication and custom TLS settings
 python do_pull_containers() {
     import subprocess
     import os
@@ -348,6 +398,8 @@ python do_pull_containers() {
         image = get_container_var(d, container_name, 'IMAGE')
         digest = get_container_var(d, container_name, 'DIGEST')
         auth_file = get_container_var(d, container_name, 'AUTH_FILE')
+        tls_verify = get_container_var(d, container_name, 'TLS_VERIFY')
+        cert_dir = get_container_var(d, container_name, 'CERT_DIR')
 
         # Determine full image reference
         if digest:
@@ -366,9 +418,22 @@ python do_pull_containers() {
         # Build skopeo command
         skopeo_args = ['skopeo', 'copy', '--override-arch', oci_arch]
 
-        if auth_file and os.path.exists(auth_file):
-            skopeo_args.extend(['--authfile', auth_file])
-            bb.note(f"Using auth file: {auth_file}")
+        # Authentication for private registries
+        if auth_file:
+            if os.path.exists(auth_file):
+                skopeo_args.extend(['--authfile', auth_file])
+                bb.note(f"Using auth file: {auth_file}")
+            else:
+                bb.warn(f"Auth file specified but not found: {auth_file}")
+
+        # TLS options for private registries with self-signed certificates
+        if tls_verify == '0':
+            skopeo_args.append('--src-tls-verify=false')
+            bb.warn(f"TLS verification disabled for '{container_name}' - use only for testing")
+
+        if cert_dir and os.path.isdir(cert_dir):
+            skopeo_args.extend(['--src-cert-dir', cert_dir])
+            bb.note(f"Using certificate directory: {cert_dir}")
 
         # Add source and destination
         skopeo_args.append(f"docker://{full_image}")
@@ -378,10 +443,27 @@ python do_pull_containers() {
 
         # Run skopeo
         try:
-            subprocess.run(skopeo_args, check=True)
+            result = subprocess.run(skopeo_args, check=True, capture_output=True, text=True)
             bb.note(f"Container image '{container_name}' pulled successfully")
         except subprocess.CalledProcessError as e:
-            bb.fatal(f"Failed to pull container image '{container_name}' ({full_image})")
+            error_msg = e.stderr if e.stderr else str(e)
+            # Provide more specific error messages based on the error
+            if 'unauthorized' in error_msg.lower() or 'authentication required' in error_msg.lower():
+                if auth_file:
+                    bb.fatal(f"Failed to pull container image '{container_name}' ({full_image}): "
+                             f"Authentication failed. Check that the auth file '{auth_file}' contains valid credentials.")
+                else:
+                    bb.fatal(f"Failed to pull container image '{container_name}' ({full_image}): "
+                             f"Authentication required. Add 'CONTAINER_{container_name}_AUTH_FILE' to your configuration.")
+            elif 'certificate' in error_msg.lower() or 'x509' in error_msg.lower():
+                bb.fatal(f"Failed to pull container image '{container_name}' ({full_image}): "
+                         f"TLS certificate error. Set 'CONTAINER_{container_name}_TLS_VERIFY = \"0\"' for self-signed certs "
+                         f"or 'CONTAINER_{container_name}_CERT_DIR' to specify custom CA certificates.")
+            elif 'manifest unknown' in error_msg.lower() or 'not found' in error_msg.lower():
+                bb.fatal(f"Failed to pull container image '{container_name}' ({full_image}): "
+                         f"Image or tag not found in registry.")
+            else:
+                bb.fatal(f"Failed to pull container image '{container_name}' ({full_image}): {error_msg}")
 
         # Post-pull verification (default behavior)
         verify_oci_image(oci_dir, container_name, full_image, d)
@@ -525,6 +607,62 @@ python do_generate_quadlets() {
         if cpu_limit:
             lines.append("PodmanArgs=--cpus " + cpu_limit)
 
+        # Cgroups mode
+        cgroups = get_container_var(d, container_name, 'CGROUPS')
+        if cgroups:
+            lines.append("PodmanArgs=--cgroups " + cgroups)
+
+        # SD-Notify mode
+        sdnotify = get_container_var(d, container_name, 'SDNOTIFY')
+        if sdnotify:
+            lines.append("Notify=" + ("true" if sdnotify == "container" else "false"))
+            if sdnotify != "conmon":
+                lines.append("PodmanArgs=--sdnotify " + sdnotify)
+
+        # Timezone
+        timezone = get_container_var(d, container_name, 'TIMEZONE')
+        if timezone:
+            lines.append("Timezone=" + timezone)
+
+        # Health check options
+        health_cmd = get_container_var(d, container_name, 'HEALTH_CMD')
+        if health_cmd:
+            lines.append("HealthCmd=" + health_cmd)
+
+        health_interval = get_container_var(d, container_name, 'HEALTH_INTERVAL')
+        if health_interval:
+            lines.append("HealthInterval=" + health_interval)
+
+        health_timeout = get_container_var(d, container_name, 'HEALTH_TIMEOUT')
+        if health_timeout:
+            lines.append("HealthTimeout=" + health_timeout)
+
+        health_retries = get_container_var(d, container_name, 'HEALTH_RETRIES')
+        if health_retries:
+            lines.append("HealthRetries=" + health_retries)
+
+        health_start_period = get_container_var(d, container_name, 'HEALTH_START_PERIOD')
+        if health_start_period:
+            lines.append("HealthStartPeriod=" + health_start_period)
+
+        # Log driver
+        log_driver = get_container_var(d, container_name, 'LOG_DRIVER')
+        if log_driver:
+            lines.append("LogDriver=" + log_driver)
+
+        # Log options
+        log_opt = get_container_var(d, container_name, 'LOG_OPT')
+        if log_opt:
+            for opt in log_opt.split():
+                if '=' in opt:
+                    lines.append("PodmanArgs=--log-opt " + opt)
+
+        # Ulimits
+        ulimits = get_container_var(d, container_name, 'ULIMITS')
+        if ulimits:
+            for ulimit in ulimits.split():
+                lines.append("Ulimit=" + ulimit)
+
         lines.append("")
 
         # [Service] section
@@ -532,6 +670,12 @@ python do_generate_quadlets() {
         restart = get_container_var(d, container_name, 'RESTART', 'always')
         lines.append("Restart=" + restart)
         lines.append("TimeoutStartSec=900")
+
+        # Stop timeout
+        stop_timeout = get_container_var(d, container_name, 'STOP_TIMEOUT')
+        if stop_timeout:
+            lines.append("TimeoutStopSec=" + stop_timeout)
+
         lines.append("")
 
         # [Install] section
