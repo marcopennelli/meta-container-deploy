@@ -941,6 +941,19 @@ The manifest extracts standard OCI labels when available:
 - `org.opencontainers.image.source` - Source repository URL
 - `org.opencontainers.image.licenses` - License identifier
 
+### Deploy Directory
+
+The digest manifest is also deployed to the BitBake `DEPLOYDIR` for use by external CI/CD tooling:
+
+```
+tmp/deploy/images/<machine>/container-digests.json
+```
+
+This enables:
+- Artifact signing pipelines to access digest information without extracting the image
+- CI/CD systems to record provenance metadata alongside build artifacts
+- External SBOM generators to incorporate container digests
+
 ## Build Sequence
 
 During `bitbake`, the following steps occur for container images:
