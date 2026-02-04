@@ -31,6 +31,7 @@ This enables reproducible, air-gapped container deployments for embedded Linux s
 - **Dependency management** - Container service ordering via systemd dependencies
 - **Security options** - Capabilities, security labels, read-only rootfs support
 - **Image verification** - Post-pull OCI structure validation (default) and optional pre-pull registry checks
+- **SBOM/Provenance support** - Automatic digest resolution with OCI labels extraction for Software Bill of Materials
 - **Rootfs auto-expansion** - Automatically expand root filesystem to full storage capacity on first boot (ideal for SD card deployments)
 
 ## Technology Overview

@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## 2026-02-04
+
+### Changed
+- Documentation updated with SBOM/Provenance in features list ([9e560f3])
+
 ## 2026-02-03
 
 ### Added
@@ -115,3 +120,4 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 [f6b8e0f]: https://github.com/marcopennelli/meta-container-deploy/commit/f6b8e0f
 [fcb7aa2]: https://github.com/marcopennelli/meta-container-deploy/commit/fcb7aa2
 [f0e5d64]: https://github.com/marcopennelli/meta-container-deploy/commit/f0e5d64
+[9e560f3]: https://github.com/marcopennelli/meta-container-deploy/commit/9e560f3
