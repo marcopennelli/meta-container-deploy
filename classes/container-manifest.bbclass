@@ -66,7 +66,13 @@ inherit deploy
 #   read_only             - Boolean for read-only root filesystem
 #   memory_limit          - Memory limit (e.g., "512m", "1g")
 #   cpu_limit             - CPU limit (e.g., "0.5", "2")
-#   enabled               - Boolean to enable/disable auto-start (default: true)
+#   enabled               - Boolean to enable/disable auto-start (default: true).
+#                           Disabled containers are still pulled and imported into
+#                           Podman storage, but their Quadlet files are installed to
+#                           /etc/containers/systemd-available/ instead of the active
+#                           /etc/containers/systemd/ directory. To enable at runtime:
+#                             cp /etc/containers/systemd-available/<name>.container /etc/containers/systemd/
+#                             systemctl daemon-reload && systemctl start <name>
 #   labels                - Dict or list of container labels
 #   depends_on            - List of container names this depends on
 #   entrypoint            - Override container entrypoint
@@ -134,7 +140,9 @@ inherit deploy
 #   mac                   - Static MAC address for the pod
 #   add_host              - List of host:ip mappings for /etc/hosts
 #   userns                - User namespace mode
-#   enabled               - Boolean to enable/disable auto-start (default: true)
+#   enabled               - Boolean to enable/disable auto-start (default: true,
+#                           same behavior as container enabled: Quadlet goes to
+#                           systemd-available/)
 #
 # Copyright (c) 2025 Marco Pennelli <marco.pennelli@technosec.net>
 # SPDX-License-Identifier: MIT
@@ -1039,17 +1047,17 @@ python do_generate_quadlets() {
 
         lines.append("")
 
-        # [Install] section
+        # [Install] section - always write proper WantedBy so the file works
+        # as-is when moved to the active directory
         lines.append("[Install]")
-        enabled = container.get('enabled', True)
-        if enabled:
-            lines.append("WantedBy=multi-user.target")
-        else:
-            lines.append("# Container disabled - uncomment to enable")
-            lines.append("# WantedBy=multi-user.target")
+        lines.append("WantedBy=multi-user.target")
 
-        # Write the Quadlet file
-        quadlet_dir = os.path.join(workdir, 'quadlets')
+        # Write the Quadlet file to active or available directory based on enabled state
+        enabled = container.get('enabled', True)
+        if not enabled:
+            quadlet_dir = os.path.join(workdir, 'quadlets-available')
+        else:
+            quadlet_dir = os.path.join(workdir, 'quadlets')
         os.makedirs(quadlet_dir, exist_ok=True)
         quadlet_file = os.path.join(quadlet_dir, container_name + ".container")
 
@@ -1161,17 +1169,17 @@ python do_generate_pods() {
 
         lines.append("")
 
-        # [Install] section
+        # [Install] section - always write proper WantedBy so the file works
+        # as-is when moved to the active directory
         lines.append("[Install]")
-        enabled = pod.get('enabled', True)
-        if enabled:
-            lines.append("WantedBy=multi-user.target")
-        else:
-            lines.append("# Pod disabled - uncomment to enable")
-            lines.append("# WantedBy=multi-user.target")
+        lines.append("WantedBy=multi-user.target")
 
-        # Write the Quadlet pod file
-        quadlet_dir = os.path.join(workdir, 'quadlets')
+        # Write the Quadlet pod file to active or available directory based on enabled state
+        enabled = pod.get('enabled', True)
+        if not enabled:
+            quadlet_dir = os.path.join(workdir, 'quadlets-available')
+        else:
+            quadlet_dir = os.path.join(workdir, 'quadlets')
         os.makedirs(quadlet_dir, exist_ok=True)
         pod_file = os.path.join(quadlet_dir, pod_name + ".pod")
 
@@ -1274,13 +1282,19 @@ do_install:append() {
             bbwarn "OCI image not found for container: ${CONTAINER_NAME}"
         fi
 
-        # Install Quadlet file
+        # Install Quadlet file (active or available based on enabled state)
         if [ -f "${WORKDIR}/quadlets/${CONTAINER_NAME}.container" ]; then
             install -d ${D}${QUADLET_DIR}
             install -m 0644 ${WORKDIR}/quadlets/${CONTAINER_NAME}.container \
                 ${D}${QUADLET_DIR}/
 
             bbnote "Installed Quadlet file for container: ${CONTAINER_NAME}"
+        elif [ -f "${WORKDIR}/quadlets-available/${CONTAINER_NAME}.container" ]; then
+            install -d ${D}${sysconfdir}/containers/systemd-available
+            install -m 0644 ${WORKDIR}/quadlets-available/${CONTAINER_NAME}.container \
+                ${D}${sysconfdir}/containers/systemd-available/
+
+            bbnote "Installed disabled Quadlet file for container: ${CONTAINER_NAME} (available, not active)"
         fi
 
         # Install import script
@@ -1293,7 +1307,7 @@ do_install:append() {
         fi
     done
 
-    # Install pod Quadlet files
+    # Install pod Quadlet files (active or available based on enabled state)
     MANIFEST_PODS="${PODS_FROM_MANIFEST}"
     for POD_NAME in $MANIFEST_PODS; do
         if [ -f "${WORKDIR}/quadlets/${POD_NAME}.pod" ]; then
@@ -1302,6 +1316,12 @@ do_install:append() {
                 ${D}${QUADLET_DIR}/
 
             bbnote "Installed Quadlet pod file for: ${POD_NAME}"
+        elif [ -f "${WORKDIR}/quadlets-available/${POD_NAME}.pod" ]; then
+            install -d ${D}${sysconfdir}/containers/systemd-available
+            install -m 0644 ${WORKDIR}/quadlets-available/${POD_NAME}.pod \
+                ${D}${sysconfdir}/containers/systemd-available/
+
+            bbnote "Installed disabled Quadlet pod file for: ${POD_NAME} (available, not active)"
         fi
     done
 
@@ -1323,6 +1343,8 @@ FILES:${PN} += "\
     ${CONTAINER_PRELOAD_DIR}/* \
     ${QUADLET_DIR}/*.container \
     ${QUADLET_DIR}/*.pod \
+    ${sysconfdir}/containers/systemd-available/*.container \
+    ${sysconfdir}/containers/systemd-available/*.pod \
     ${sysconfdir}/containers/import.d/*.sh \
     ${CONTAINER_IMPORT_MARKER_DIR} \
     ${datadir}/containers/container-digests.json \

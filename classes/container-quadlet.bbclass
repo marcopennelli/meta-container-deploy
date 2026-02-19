@@ -32,7 +32,13 @@
 #   CONTAINER_LABELS - Space-separated key=value label pairs
 #   CONTAINER_MEMORY_LIMIT - Memory limit (e.g., 512m, 1g)
 #   CONTAINER_CPU_LIMIT - CPU limit (e.g., 0.5, 2)
-#   CONTAINER_ENABLED - Set to "0" to disable auto-start (default: 1)
+#   CONTAINER_ENABLED - Set to "0" to disable auto-start (default: 1). Disabled
+#                      containers are still pulled and available in Podman storage,
+#                      but their Quadlet file is installed to
+#                      /etc/containers/systemd-available/ instead of the active
+#                      /etc/containers/systemd/ directory. To enable at runtime:
+#                        cp /etc/containers/systemd-available/<name>.container /etc/containers/systemd/
+#                        systemctl daemon-reload && systemctl start <name>
 #   CONTAINER_POD - Pod name to join (generates Pod=<name>.pod directive)
 #   CONTAINER_CGROUPS - Cgroups mode: enabled, disabled, no-conmon, split
 #   CONTAINER_SDNOTIFY - SD-Notify mode: conmon, container, healthy, ignore
@@ -336,13 +342,15 @@ python do_generate_quadlet() {
     lines.append("[Install]")
     lines.append("WantedBy=multi-user.target")
 
-    # Write the Quadlet file
+    # Write the Quadlet file to active or available directory based on enabled state
     workdir = d.getVar('WORKDIR')
     enabled = d.getVar('CONTAINER_ENABLED')
     if enabled == '0':
-        quadlet_file = os.path.join(workdir, container_name + ".container.available")
+        quadlet_dir = os.path.join(workdir, 'quadlets-available')
     else:
-        quadlet_file = os.path.join(workdir, container_name + ".container")
+        quadlet_dir = os.path.join(workdir, 'quadlets')
+    os.makedirs(quadlet_dir, exist_ok=True)
+    quadlet_file = os.path.join(quadlet_dir, container_name + ".container")
 
     with open(quadlet_file, 'w') as f:
         f.write('\n'.join(lines))
@@ -357,14 +365,14 @@ addtask do_generate_quadlet after do_configure before do_compile
 do_install:append() {
     CONTAINER_NAME="${CONTAINER_NAME}"
 
-    if [ -f "${WORKDIR}/${CONTAINER_NAME}.container" ]; then
+    if [ -f "${WORKDIR}/quadlets/${CONTAINER_NAME}.container" ]; then
         install -d ${D}${QUADLET_DIR}
-        install -m 0644 ${WORKDIR}/${CONTAINER_NAME}.container \
+        install -m 0644 ${WORKDIR}/quadlets/${CONTAINER_NAME}.container \
             ${D}${QUADLET_DIR}/
-    elif [ -f "${WORKDIR}/${CONTAINER_NAME}.container.available" ]; then
+    elif [ -f "${WORKDIR}/quadlets-available/${CONTAINER_NAME}.container" ]; then
         install -d ${D}${sysconfdir}/containers/systemd-available
-        install -m 0644 ${WORKDIR}/${CONTAINER_NAME}.container.available \
-            ${D}${sysconfdir}/containers/systemd-available/${CONTAINER_NAME}.container
+        install -m 0644 ${WORKDIR}/quadlets-available/${CONTAINER_NAME}.container \
+            ${D}${sysconfdir}/containers/systemd-available/
     fi
 }
 
