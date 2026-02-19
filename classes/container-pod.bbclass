@@ -36,7 +36,12 @@
 #   POD_MAC - Static MAC address for the pod
 #   POD_ADD_HOST - Space-separated host:ip mappings for /etc/hosts
 #   POD_USERNS - User namespace mode
-#   POD_ENABLED - Set to "0" to disable auto-start (default: 1)
+#   POD_ENABLED - Set to "0" to disable auto-start (default: 1). Disabled pods
+#                 have their Quadlet file installed to /etc/containers/systemd-available/
+#                 instead of the active /etc/containers/systemd/ directory.
+#                 To enable at runtime:
+#                   cp /etc/containers/systemd-available/<name>.pod /etc/containers/systemd/
+#                   systemctl daemon-reload && systemctl start <name>
 #
 # Copyright (c) 2026 Marco Pennelli <marco.pennelli@technosec.net>
 # SPDX-License-Identifier: MIT
@@ -161,18 +166,20 @@ python do_generate_pod() {
 
     lines.append("")
 
-    # [Install] section
+    # [Install] section - always write proper WantedBy so the file works
+    # as-is when moved to the active directory
     lines.append("[Install]")
-    enabled = d.getVar('POD_ENABLED')
-    if enabled != '0':
-        lines.append("WantedBy=multi-user.target")
-    else:
-        lines.append("# Pod disabled - uncomment to enable")
-        lines.append("# WantedBy=multi-user.target")
+    lines.append("WantedBy=multi-user.target")
 
-    # Write the Quadlet pod file
+    # Write the Quadlet pod file to active or available directory based on enabled state
     workdir = d.getVar('WORKDIR')
-    pod_file = os.path.join(workdir, pod_name + ".pod")
+    enabled = d.getVar('POD_ENABLED')
+    if enabled == '0':
+        quadlet_dir = os.path.join(workdir, 'quadlets-available')
+    else:
+        quadlet_dir = os.path.join(workdir, 'quadlets')
+    os.makedirs(quadlet_dir, exist_ok=True)
+    pod_file = os.path.join(quadlet_dir, pod_name + ".pod")
 
     with open(pod_file, 'w') as f:
         f.write('\n'.join(lines))
@@ -183,14 +190,20 @@ python do_generate_pod() {
 
 addtask do_generate_pod after do_configure before do_compile
 
-# Install Quadlet pod file (appends to do_install)
+# Install Quadlet pod file (active or available based on enabled state)
 do_install:append() {
     POD_NAME="${POD_NAME}"
 
-    install -d ${D}${QUADLET_DIR}
-    install -m 0644 ${WORKDIR}/${POD_NAME}.pod \
-        ${D}${QUADLET_DIR}/
+    if [ -f "${WORKDIR}/quadlets/${POD_NAME}.pod" ]; then
+        install -d ${D}${QUADLET_DIR}
+        install -m 0644 ${WORKDIR}/quadlets/${POD_NAME}.pod \
+            ${D}${QUADLET_DIR}/
+    elif [ -f "${WORKDIR}/quadlets-available/${POD_NAME}.pod" ]; then
+        install -d ${D}${sysconfdir}/containers/systemd-available
+        install -m 0644 ${WORKDIR}/quadlets-available/${POD_NAME}.pod \
+            ${D}${sysconfdir}/containers/systemd-available/
+    fi
 }
 
 # Package files - use :append to allow combining with other bbclasses
-FILES:${PN}:append = " ${QUADLET_DIR}/${POD_NAME}.pod"
+FILES:${PN}:append = " ${QUADLET_DIR}/${POD_NAME}.pod ${sysconfdir}/containers/systemd-available/${POD_NAME}.pod"
