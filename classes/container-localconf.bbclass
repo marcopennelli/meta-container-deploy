@@ -84,6 +84,30 @@ inherit deploy
 #   POD_<name>_ENABLED - Set to "0" to disable pod auto-start (same behavior as
 #                       container ENABLED: Quadlet goes to systemd-available/)
 #
+# Network configuration (NETWORKS variable + NETWORK_<name>_<VAR>):
+#   NETWORKS - Space-separated list of network names to create
+#   NETWORK_<name>_DRIVER - Network driver: bridge (default), macvlan, ipvlan
+#   NETWORK_<name>_SUBNET - Subnet in CIDR notation (e.g., "10.89.0.0/24")
+#   NETWORK_<name>_GATEWAY - Gateway address for the subnet
+#   NETWORK_<name>_IP_RANGE - Allocatable IP range within the subnet (CIDR)
+#   NETWORK_<name>_IPV6 - Set to "1" to enable IPv6 support
+#   NETWORK_<name>_INTERNAL - Set to "1" to disable external connectivity
+#   NETWORK_<name>_DNS - Space-separated DNS server addresses
+#   NETWORK_<name>_LABELS - Space-separated key=value labels
+#   NETWORK_<name>_OPTIONS - Space-separated key=value driver options (e.g., mtu=9000)
+#   NETWORK_<name>_ENABLED - Set to "0" to disable (Quadlet goes to systemd-available/)
+#
+# Example with networks:
+#   NETWORKS = "appnet"
+#   NETWORK_appnet_DRIVER = "bridge"
+#   NETWORK_appnet_SUBNET = "10.89.0.0/24"
+#   NETWORK_appnet_GATEWAY = "10.89.0.1"
+#
+#   CONTAINERS = "myservice"
+#   CONTAINER_myservice_IMAGE = "myregistry/service:v1"
+#   CONTAINER_myservice_NETWORK = "appnet"
+#   CONTAINER_myservice_NETWORK_ALIASES = "service-dns-name"
+#
 # Example with pods:
 #   PODS = "myapp"
 #   POD_myapp_PORTS = "8080:8080 8081:8081"
@@ -103,6 +127,9 @@ CONTAINERS ?= ""
 
 # List of pods to configure
 PODS ?= ""
+
+# List of networks to configure
+NETWORKS ?= ""
 
 # Enable automatic rootfs expansion on first boot
 # Set to "1" to include rootfs-expand package which expands the root
@@ -172,21 +199,41 @@ def get_pod_var(d, pod_name, var_name, default=''):
     var = d.getVar('POD_%s_%s' % (pod_name, var_name))
     return var if var else default
 
+def get_network_list(d):
+    """Get the list of network names from NETWORKS variable."""
+    networks = d.getVar('NETWORKS') or ''
+    return [n.strip() for n in networks.split() if n.strip()]
+
+def get_network_var(d, network_name, var_name, default=''):
+    """Get a network-specific variable with fallback to default."""
+    # Sanitize network name for BitBake variable (replace - with _)
+    safe_name = network_name.replace('-', '_').replace('.', '_')
+    var = d.getVar('NETWORK_%s_%s' % (safe_name, var_name))
+    if var:
+        return var
+    # Also try with original name (in case user used original format)
+    var = d.getVar('NETWORK_%s_%s' % (network_name, var_name))
+    return var if var else default
+
 # Global pre-pull verification flag
 CONTAINERS_VERIFY ?= "0"
 
 # All container configuration variable suffixes
-CONTAINER_VAR_SUFFIXES = "IMAGE PORTS VOLUMES ENVIRONMENT NETWORK RESTART USER WORKING_DIR DEVICES CAPS_ADD CAPS_DROP PRIVILEGED READ_ONLY MEMORY_LIMIT CPU_LIMIT ENABLED LABELS DEPENDS_ON ENTRYPOINT COMMAND PULL_POLICY DIGEST AUTH_FILE SECURITY_OPTS POD VERIFY CGROUPS SDNOTIFY TIMEZONE STOP_TIMEOUT HEALTH_CMD HEALTH_INTERVAL HEALTH_TIMEOUT HEALTH_RETRIES HEALTH_START_PERIOD LOG_DRIVER LOG_OPT ULIMITS"
+CONTAINER_VAR_SUFFIXES = "IMAGE PORTS VOLUMES ENVIRONMENT NETWORK RESTART USER WORKING_DIR DEVICES CAPS_ADD CAPS_DROP PRIVILEGED READ_ONLY MEMORY_LIMIT CPU_LIMIT ENABLED LABELS DEPENDS_ON ENTRYPOINT COMMAND PULL_POLICY DIGEST AUTH_FILE SECURITY_OPTS POD VERIFY CGROUPS SDNOTIFY TIMEZONE STOP_TIMEOUT HEALTH_CMD HEALTH_INTERVAL HEALTH_TIMEOUT HEALTH_RETRIES HEALTH_START_PERIOD LOG_DRIVER LOG_OPT ULIMITS NETWORK_ALIASES"
 
 # All pod configuration variable suffixes
 POD_VAR_SUFFIXES = "PORTS NETWORK VOLUMES LABELS DNS DNS_SEARCH HOSTNAME IP MAC ADD_HOST USERNS ENABLED"
+
+# All network configuration variable suffixes
+NETWORK_VAR_SUFFIXES = "DRIVER SUBNET GATEWAY IP_RANGE IPV6 INTERNAL DNS LABELS OPTIONS ENABLED"
 
 # Validate container and pod configuration at parse time and set up vardeps
 python __anonymous() {
     containers = get_container_list(d)
     pods = get_pod_list(d)
+    networks = get_network_list(d)
 
-    if not containers and not pods:
+    if not containers and not pods and not networks:
         return
 
     # Build list of all container variables for vardeps
@@ -242,10 +289,26 @@ python __anonymous() {
         if get_pod_var(d, pod_name, 'NETWORK') == 'host':
             bb.warn("Pod '%s' uses host networking - network isolation disabled" % pod_name)
 
-    # Set vardeps for tasks that depend on container/pod configuration
+    # Build list of all network variables for vardeps
+    network_var_suffixes = (d.getVar('NETWORK_VAR_SUFFIXES') or '').split()
+    all_vars.append('NETWORKS')
+
+    for network_name in networks:
+        safe_name = network_name.replace('-', '_').replace('.', '_')
+        for suffix in network_var_suffixes:
+            all_vars.append(f'NETWORK_{safe_name}_{suffix}')
+
+        # Validate driver if specified
+        driver = get_network_var(d, network_name, 'DRIVER')
+        if driver and driver not in ('bridge', 'macvlan', 'ipvlan'):
+            bb.fatal("NETWORK_%s_DRIVER must be one of: bridge, macvlan, ipvlan (got '%s')" %
+                     (network_name.replace('-', '_'), driver))
+
+    # Set vardeps for tasks that depend on container/pod/network configuration
     vardeps_str = ' '.join(all_vars)
     d.appendVarFlag('do_generate_quadlets', 'vardeps', ' ' + vardeps_str)
     d.appendVarFlag('do_generate_pods', 'vardeps', ' ' + vardeps_str)
+    d.appendVarFlag('do_generate_networks', 'vardeps', ' ' + vardeps_str)
     d.appendVarFlag('do_generate_import_scripts', 'vardeps', ' ' + vardeps_str)
     d.appendVarFlag('do_pull_containers', 'vardeps', ' ' + vardeps_str)
 
@@ -253,6 +316,8 @@ python __anonymous() {
         bb.note("Configured %d containers from local.conf: %s" % (len(containers), ', '.join(containers)))
     if pods:
         bb.note("Configured %d pods from local.conf: %s" % (len(pods), ', '.join(pods)))
+    if networks:
+        bb.note("Configured %d networks from local.conf: %s" % (len(networks), ', '.join(networks)))
 }
 
 def verify_oci_image(oci_dir, container_name, full_image, d):
@@ -812,6 +877,12 @@ python do_generate_quadlets() {
             for ulimit in ulimits.split():
                 lines.append("Ulimit=" + ulimit)
 
+        # Network aliases (DNS names within the container's network)
+        network_aliases = get_container_var(d, container_name, 'NETWORK_ALIASES')
+        if network_aliases:
+            for alias in network_aliases.split():
+                lines.append("PodmanArgs=--network-alias " + alias)
+
         lines.append("")
 
         # [Service] section
@@ -963,6 +1034,106 @@ python do_generate_pods() {
 
 addtask do_generate_pods after do_configure before do_compile
 
+# Generate Quadlet .network files for all networks
+python do_generate_networks() {
+    import os
+
+    networks = get_network_list(d)
+    if not networks:
+        return
+
+    workdir = d.getVar('WORKDIR')
+
+    for network_name in networks:
+        # Build Quadlet network file content
+        lines = []
+
+        # [Unit] section
+        lines.append("# Podman Quadlet network file for " + network_name)
+        lines.append("# Auto-generated by meta-container-deploy (container-localconf)")
+        lines.append("")
+        lines.append("[Unit]")
+        lines.append("Description=" + network_name + " network")
+        lines.append("")
+
+        # [Network] section
+        lines.append("[Network]")
+        lines.append("NetworkName=" + network_name)
+
+        # Driver
+        driver = get_network_var(d, network_name, 'DRIVER')
+        if driver:
+            lines.append("Driver=" + driver)
+
+        # Subnet
+        subnet = get_network_var(d, network_name, 'SUBNET')
+        if subnet:
+            lines.append("Subnet=" + subnet)
+
+        # Gateway
+        gateway = get_network_var(d, network_name, 'GATEWAY')
+        if gateway:
+            lines.append("Gateway=" + gateway)
+
+        # IP range
+        ip_range = get_network_var(d, network_name, 'IP_RANGE')
+        if ip_range:
+            lines.append("IPRange=" + ip_range)
+
+        # IPv6
+        ipv6 = get_network_var(d, network_name, 'IPV6')
+        if ipv6 == '1':
+            lines.append("IPv6=true")
+
+        # Internal (no external connectivity)
+        internal = get_network_var(d, network_name, 'INTERNAL')
+        if internal == '1':
+            lines.append("Internal=true")
+
+        # DNS servers
+        dns = get_network_var(d, network_name, 'DNS')
+        if dns:
+            for server in dns.split():
+                lines.append("DNS=" + server)
+
+        # Labels
+        labels = get_network_var(d, network_name, 'LABELS')
+        if labels:
+            for label in labels.split():
+                if '=' in label:
+                    lines.append("Label=" + label)
+
+        # Driver-specific options
+        options = get_network_var(d, network_name, 'OPTIONS')
+        if options:
+            for opt in options.split():
+                if '=' in opt:
+                    lines.append("Options=" + opt)
+
+        lines.append("")
+
+        # [Install] section
+        lines.append("[Install]")
+        lines.append("WantedBy=multi-user.target")
+
+        # Write the Quadlet network file to active or available directory based on enabled state
+        enabled = get_network_var(d, network_name, 'ENABLED', '1')
+        if enabled == '0':
+            quadlet_dir = os.path.join(workdir, 'quadlets-available')
+        else:
+            quadlet_dir = os.path.join(workdir, 'quadlets')
+        os.makedirs(quadlet_dir, exist_ok=True)
+        network_file = os.path.join(quadlet_dir, network_name + ".network")
+
+        with open(network_file, 'w') as f:
+            f.write('\n'.join(lines))
+            f.write('\n')
+
+        bb.note("Generated Quadlet network file for '%s': %s" % (network_name, network_file))
+}
+
+addtask do_generate_networks after do_configure before do_compile
+
 # Generate import scripts for all containers
 python do_generate_import_scripts() {
     import os
@@ -1084,6 +1255,23 @@ do_install:append() {
         fi
     done
 
+    # Install network Quadlet files (active or available based on enabled state)
+    for NETWORK_NAME in ${NETWORKS}; do
+        if [ -f "${WORKDIR}/quadlets/${NETWORK_NAME}.network" ]; then
+            install -d ${D}${QUADLET_DIR}
+            install -m 0644 ${WORKDIR}/quadlets/${NETWORK_NAME}.network \
+                ${D}${QUADLET_DIR}/
+
+            bbnote "Installed Quadlet network file for: ${NETWORK_NAME}"
+        elif [ -f "${WORKDIR}/quadlets-available/${NETWORK_NAME}.network" ]; then
+            install -d ${D}${sysconfdir}/containers/systemd-available
+            install -m 0644 ${WORKDIR}/quadlets-available/${NETWORK_NAME}.network \
+                ${D}${sysconfdir}/containers/systemd-available/
+
+            bbnote "Installed disabled Quadlet network file for: ${NETWORK_NAME} (available, not active)"
+        fi
+    done
+
     # Create import marker directory
     install -d ${D}${CONTAINER_IMPORT_MARKER_DIR}
 
@@ -1102,8 +1290,10 @@ FILES:${PN} += "\
     ${CONTAINER_PRELOAD_DIR}/* \
     ${QUADLET_DIR}/*.container \
     ${QUADLET_DIR}/*.pod \
+    ${QUADLET_DIR}/*.network \
     ${sysconfdir}/containers/systemd-available/*.container \
     ${sysconfdir}/containers/systemd-available/*.pod \
+    ${sysconfdir}/containers/systemd-available/*.network \
     ${sysconfdir}/containers/import.d/*.sh \
     ${CONTAINER_IMPORT_MARKER_DIR} \
     ${datadir}/containers/container-digests.json \
