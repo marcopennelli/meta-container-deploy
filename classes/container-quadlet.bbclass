@@ -331,18 +331,18 @@ python do_generate_quadlet() {
 
     lines.append("")
 
-    # [Install] section
+    # [Install] section - always write proper WantedBy so the file works
+    # as-is when moved to the active directory
     lines.append("[Install]")
-    enabled = d.getVar('CONTAINER_ENABLED')
-    if enabled != '0':
-        lines.append("WantedBy=multi-user.target")
-    else:
-        lines.append("# Container disabled - uncomment to enable")
-        lines.append("# WantedBy=multi-user.target")
+    lines.append("WantedBy=multi-user.target")
 
     # Write the Quadlet file
     workdir = d.getVar('WORKDIR')
-    quadlet_file = os.path.join(workdir, container_name + ".container")
+    enabled = d.getVar('CONTAINER_ENABLED')
+    if enabled == '0':
+        quadlet_file = os.path.join(workdir, container_name + ".container.available")
+    else:
+        quadlet_file = os.path.join(workdir, container_name + ".container")
 
     with open(quadlet_file, 'w') as f:
         f.write('\n'.join(lines))
@@ -353,14 +353,20 @@ python do_generate_quadlet() {
 
 addtask do_generate_quadlet after do_configure before do_compile
 
-# Install Quadlet file (appends to do_install)
+# Install Quadlet file (active or available based on enabled state)
 do_install:append() {
     CONTAINER_NAME="${CONTAINER_NAME}"
 
-    install -d ${D}${QUADLET_DIR}
-    install -m 0644 ${WORKDIR}/${CONTAINER_NAME}.container \
-        ${D}${QUADLET_DIR}/
+    if [ -f "${WORKDIR}/${CONTAINER_NAME}.container" ]; then
+        install -d ${D}${QUADLET_DIR}
+        install -m 0644 ${WORKDIR}/${CONTAINER_NAME}.container \
+            ${D}${QUADLET_DIR}/
+    elif [ -f "${WORKDIR}/${CONTAINER_NAME}.container.available" ]; then
+        install -d ${D}${sysconfdir}/containers/systemd-available
+        install -m 0644 ${WORKDIR}/${CONTAINER_NAME}.container.available \
+            ${D}${sysconfdir}/containers/systemd-available/${CONTAINER_NAME}.container
+    fi
 }
 
 # Package files - use :append to allow combining with other bbclasses
-FILES:${PN}:append = " ${QUADLET_DIR}/${CONTAINER_NAME}.container"
+FILES:${PN}:append = " ${QUADLET_DIR}/${CONTAINER_NAME}.container ${sysconfdir}/containers/systemd-available/${CONTAINER_NAME}.container"
