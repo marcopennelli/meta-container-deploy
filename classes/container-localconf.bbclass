@@ -821,17 +821,17 @@ python do_generate_quadlets() {
 
         lines.append("")
 
-        # [Install] section
+        # [Install] section - always write proper WantedBy so the file works
+        # as-is when moved to the active directory
         lines.append("[Install]")
-        enabled = get_container_var(d, container_name, 'ENABLED', '1')
-        if enabled != '0':
-            lines.append("WantedBy=multi-user.target")
-        else:
-            lines.append("# Container disabled - uncomment to enable")
-            lines.append("# WantedBy=multi-user.target")
+        lines.append("WantedBy=multi-user.target")
 
-        # Write the Quadlet file
-        quadlet_dir = os.path.join(workdir, 'quadlets')
+        # Write the Quadlet file to active or available directory based on enabled state
+        enabled = get_container_var(d, container_name, 'ENABLED', '1')
+        if enabled == '0':
+            quadlet_dir = os.path.join(workdir, 'quadlets-available')
+        else:
+            quadlet_dir = os.path.join(workdir, 'quadlets')
         os.makedirs(quadlet_dir, exist_ok=True)
         quadlet_file = os.path.join(quadlet_dir, container_name + ".container")
 
@@ -1036,13 +1036,19 @@ do_install:append() {
             bbwarn "OCI image not found for container: ${CONTAINER_NAME}"
         fi
 
-        # Install Quadlet file
+        # Install Quadlet file (active or available based on enabled state)
         if [ -f "${WORKDIR}/quadlets/${CONTAINER_NAME}.container" ]; then
             install -d ${D}${QUADLET_DIR}
             install -m 0644 ${WORKDIR}/quadlets/${CONTAINER_NAME}.container \
                 ${D}${QUADLET_DIR}/
 
             bbnote "Installed Quadlet file for container: ${CONTAINER_NAME}"
+        elif [ -f "${WORKDIR}/quadlets-available/${CONTAINER_NAME}.container" ]; then
+            install -d ${D}${sysconfdir}/containers/systemd-available
+            install -m 0644 ${WORKDIR}/quadlets-available/${CONTAINER_NAME}.container \
+                ${D}${sysconfdir}/containers/systemd-available/
+
+            bbnote "Installed disabled Quadlet file for container: ${CONTAINER_NAME} (available, not active)"
         fi
 
         # Install import script
@@ -1084,6 +1090,7 @@ FILES:${PN} += "\
     ${CONTAINER_PRELOAD_DIR}/* \
     ${QUADLET_DIR}/*.container \
     ${QUADLET_DIR}/*.pod \
+    ${sysconfdir}/containers/systemd-available/*.container \
     ${sysconfdir}/containers/import.d/*.sh \
     ${CONTAINER_IMPORT_MARKER_DIR} \
     ${datadir}/containers/container-digests.json \
