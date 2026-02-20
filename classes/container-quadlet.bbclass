@@ -101,6 +101,7 @@ CONTAINER_HEALTH_START_PERIOD ?= ""
 CONTAINER_LOG_DRIVER ?= ""
 CONTAINER_LOG_OPT ?= ""
 CONTAINER_ULIMITS ?= ""
+CONTAINER_NETWORK_ALIASES ?= ""
 
 # Quadlet installation directory
 QUADLET_DIR = "${sysconfdir}/containers/systemd"
@@ -321,6 +322,12 @@ python do_generate_quadlet() {
     if ulimits:
         for ulimit in ulimits.split():
             lines.append("Ulimit=" + ulimit)
+
+    # Network aliases (DNS names within the container's network)
+    network_aliases = d.getVar('CONTAINER_NETWORK_ALIASES')
+    if network_aliases:
+        for alias in network_aliases.split():
+            lines.append("PodmanArgs=--network-alias " + alias)
 
     lines.append("")
 

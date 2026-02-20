@@ -193,7 +193,7 @@ def get_container_list_from_manifest(d):
     manifest_path = d.getVar('CONTAINER_MANIFEST')
     if not manifest_path:
         return []
-    containers, _ = parse_container_manifest(manifest_path, d)
+    containers, _, _ = parse_container_manifest(manifest_path, d)
     return [c.get('name', '') for c in containers if c.get('name')]
 
 def get_pod_list_from_manifest(d):
@@ -201,8 +201,16 @@ def get_pod_list_from_manifest(d):
     manifest_path = d.getVar('CONTAINER_MANIFEST')
     if not manifest_path:
         return []
-    _, pods = parse_container_manifest(manifest_path, d)
+    _, pods, _ = parse_container_manifest(manifest_path, d)
     return [p.get('name', '') for p in pods if p.get('name')]
+
+def get_network_list_from_manifest(d):
+    """Get list of network names from parsed manifest."""
+    manifest_path = d.getVar('CONTAINER_MANIFEST')
+    if not manifest_path:
+        return []
+    _, _, networks = parse_container_manifest(manifest_path, d)
+    return [n.get('name', '') for n in networks if n.get('name')]
 
 # Python function to parse manifest and validate at parse time
 python __anonymous() {
@@ -223,14 +231,16 @@ python __anonymous() {
     d.appendVarFlag('do_verify_containers', 'file-checksums', ' ' + manifest_path + ':True')
     d.appendVarFlag('do_generate_quadlets', 'file-checksums', ' ' + manifest_path + ':True')
     d.appendVarFlag('do_generate_pods', 'file-checksums', ' ' + manifest_path + ':True')
+    d.appendVarFlag('do_generate_networks', 'file-checksums', ' ' + manifest_path + ':True')
     d.appendVarFlag('do_generate_import_scripts', 'file-checksums', ' ' + manifest_path + ':True')
 
     # Parse the manifest
     try:
-        containers, pods = parse_container_manifest(manifest_path, d)
+        containers, pods, networks = parse_container_manifest(manifest_path, d)
 
         # Get pod names for validation
         pod_names = [p.get('name', '') for p in pods if p.get('name')]
+        network_names = [n.get('name', '') for n in networks if n.get('name')]
 
         if containers:
             # Store parsed containers for later use
@@ -299,12 +309,34 @@ python __anonymous() {
             bb.note("Parsed and validated %d pods from manifest: %s" %
                     (len(pods), ', '.join(pod_names)))
 
+        if networks:
+            # Store parsed networks for later use
+            d.setVar('NETWORK_MANIFEST_PARSED', str(networks))
+
+            # Store network names for shell tasks
+            d.setVar('NETWORKS_FROM_MANIFEST', ' '.join(network_names))
+
+            # Validate each network
+            for network in networks:
+                name = network.get('name', '')
+                if not name:
+                    bb.fatal("Network in manifest is missing 'name' field")
+
+                # Validate driver if specified
+                driver = network.get('driver', '')
+                if driver and driver not in ('bridge', 'macvlan', 'ipvlan'):
+                    bb.fatal("Network '%s' has invalid driver '%s'. Must be one of: bridge, macvlan, ipvlan" %
+                             (name, driver))
+
+            bb.note("Parsed and validated %d networks from manifest: %s" %
+                    (len(networks), ', '.join(network_names)))
+
     except Exception as e:
         bb.fatal("Failed to parse container manifest: %s" % str(e))
 }
 
 def parse_container_manifest(manifest_path, d):
-    """Parse a YAML or JSON container manifest file. Returns (containers, pods) tuple."""
+    """Parse a YAML or JSON container manifest file. Returns (containers, pods, networks) tuple."""
     import json
 
     with open(manifest_path, 'r') as f:
@@ -324,7 +356,7 @@ def parse_container_manifest(manifest_path, d):
             bb.fatal("Invalid YAML in manifest: %s" % str(e))
 
     if not isinstance(data, dict):
-        bb.fatal("Container manifest must be a dictionary with 'containers' and/or 'pods' key")
+        bb.fatal("Container manifest must be a dictionary with 'containers', 'pods', and/or 'networks' key")
 
     containers = data.get('containers', [])
     if not isinstance(containers, list):
@@ -334,11 +366,15 @@ def parse_container_manifest(manifest_path, d):
     if not isinstance(pods, list):
         bb.fatal("'pods' must be a list in the manifest")
 
-    return containers, pods
+    networks = data.get('networks', [])
+    if not isinstance(networks, list):
+        bb.fatal("'networks' must be a list in the manifest")
+
+    return containers, pods, networks
 
 def parse_container_manifest_containers_only(manifest_path, d):
     """Legacy wrapper that returns only containers for backward compatibility."""
-    containers, _ = parse_container_manifest(manifest_path, d)
+    containers, _, _ = parse_container_manifest(manifest_path, d)
     return containers
 
 def container_to_bitbake_vars(container, d):
@@ -506,7 +542,7 @@ python do_verify_containers() {
     if not manifest_path:
         return
 
-    containers, _ = parse_container_manifest(manifest_path, d)
+    containers, _, _ = parse_container_manifest(manifest_path, d)
     if not containers:
         return
 
@@ -657,7 +693,7 @@ python do_pull_containers() {
         bb.note("No container manifest configured")
         return
 
-    containers, _ = parse_container_manifest(manifest_path, d)
+    containers, _, _ = parse_container_manifest(manifest_path, d)
     if not containers:
         bb.note("No containers found in manifest")
         return
@@ -834,7 +870,7 @@ python do_generate_quadlets() {
     if not manifest_path:
         return
 
-    containers, _ = parse_container_manifest(manifest_path, d)
+    containers, _, _ = parse_container_manifest(manifest_path, d)
     if not containers:
         return
 
@@ -1032,6 +1068,12 @@ python do_generate_quadlets() {
                 for ulimit in ulimits:
                     lines.append("Ulimit=" + ulimit)
 
+        # Network aliases (DNS names within the container's network)
+        network_aliases = container.get('network_aliases', [])
+        if network_aliases:
+            for alias in network_aliases:
+                lines.append("PodmanArgs=--network-alias " + alias)
+
         lines.append("")
 
         # [Service] section
@@ -1078,7 +1120,7 @@ python do_generate_pods() {
     if not manifest_path:
         return
 
-    _, pods = parse_container_manifest(manifest_path, d)
+    _, pods, _ = parse_container_manifest(manifest_path, d)
     if not pods:
         return
 
@@ -1192,6 +1234,116 @@ python do_generate_pods() {
 
 addtask do_generate_pods after do_configure before do_compile
 
+# Generate Quadlet .network files for all networks
+python do_generate_networks() {
+    import os
+
+    manifest_path = d.getVar('CONTAINER_MANIFEST')
+    if not manifest_path:
+        return
+
+    _, _, networks = parse_container_manifest(manifest_path, d)
+    if not networks:
+        return
+
+    workdir = d.getVar('WORKDIR')
+
+    for network in networks:
+        network_name = network.get('name', '')
+
+        # Build Quadlet network file content
+        lines = []
+
+        # [Unit] section
+        lines.append("# Podman Quadlet network file for " + network_name)
+        lines.append("# Auto-generated by meta-container-deploy (container-manifest)")
+        lines.append("")
+        lines.append("[Unit]")
+        lines.append("Description=" + network_name + " network")
+        lines.append("")
+
+        # [Network] section
+        lines.append("[Network]")
+        lines.append("NetworkName=" + network_name)
+
+        # Driver
+        driver = network.get('driver', '')
+        if driver:
+            lines.append("Driver=" + driver)
+
+        # Subnet
+        subnet = network.get('subnet', '')
+        if subnet:
+            lines.append("Subnet=" + subnet)
+
+        # Gateway
+        gateway = network.get('gateway', '')
+        if gateway:
+            lines.append("Gateway=" + gateway)
+
+        # IP range
+        ip_range = network.get('ip_range', '')
+        if ip_range:
+            lines.append("IPRange=" + ip_range)
+
+        # IPv6
+        if network.get('ipv6'):
+            lines.append("IPv6=true")
+
+        # Internal (no external connectivity)
+        if network.get('internal'):
+            lines.append("Internal=true")
+
+        # DNS servers
+        dns = network.get('dns', [])
+        if dns:
+            for server in dns:
+                lines.append("DNS=" + str(server))
+
+        # Labels
+        labels = network.get('labels', {})
+        if labels:
+            if isinstance(labels, dict):
+                for key, value in labels.items():
+                    lines.append(f"Label={key}={value}")
+            elif isinstance(labels, list):
+                for label in labels:
+                    lines.append("Label=" + label)
+
+        # Driver-specific options
+        options = network.get('options', {})
+        if options:
+            if isinstance(options, dict):
+                for key, value in options.items():
+                    lines.append(f"Options={key}={value}")
+            elif isinstance(options, list):
+                for opt in options:
+                    lines.append("Options=" + opt)
+
+        lines.append("")
+
+        # [Install] section
+        lines.append("[Install]")
+        lines.append("WantedBy=multi-user.target")
+
+        # Write the Quadlet network file to active or available directory based on enabled state
+        enabled = network.get('enabled', True)
+        if not enabled:
+            quadlet_dir = os.path.join(workdir, 'quadlets-available')
+        else:
+            quadlet_dir = os.path.join(workdir, 'quadlets')
+        os.makedirs(quadlet_dir, exist_ok=True)
+        network_file = os.path.join(quadlet_dir, network_name + ".network")
+
+        with open(network_file, 'w') as f:
+            f.write('\n'.join(lines))
+            f.write('\n')
+
+        bb.note("Generated Quadlet network file for '%s': %s" % (network_name, network_file))
+}
+
+addtask do_generate_networks after do_configure before do_compile
+
 # Generate import scripts for all containers
 python do_generate_import_scripts() {
     import os
@@ -1200,7 +1352,7 @@ python do_generate_import_scripts() {
     if not manifest_path:
         return
 
-    containers, _ = parse_container_manifest(manifest_path, d)
+    containers, _, _ = parse_container_manifest(manifest_path, d)
     if not containers:
         return
 
@@ -1264,7 +1416,7 @@ addtask do_generate_import_scripts after do_configure before do_compile
 # Install all container artifacts
 # Note: CONTAINERS_FROM_MANIFEST and PODS_FROM_MANIFEST are set at parse time
 # from the manifest file content
-do_install[vardeps] += "CONTAINERS_FROM_MANIFEST PODS_FROM_MANIFEST"
+do_install[vardeps] += "CONTAINERS_FROM_MANIFEST PODS_FROM_MANIFEST NETWORKS_FROM_MANIFEST"
 
 do_install:append() {
     # Get list of containers from manifest
@@ -1325,6 +1477,24 @@ do_install:append() {
         fi
     done
 
+    # Install network Quadlet files (active or available based on enabled state)
+    MANIFEST_NETWORKS="${NETWORKS_FROM_MANIFEST}"
+    for NETWORK_NAME in $MANIFEST_NETWORKS; do
+        if [ -f "${WORKDIR}/quadlets/${NETWORK_NAME}.network" ]; then
+            install -d ${D}${QUADLET_DIR}
+            install -m 0644 ${WORKDIR}/quadlets/${NETWORK_NAME}.network \
+                ${D}${QUADLET_DIR}/
+
+            bbnote "Installed Quadlet network file for: ${NETWORK_NAME}"
+        elif [ -f "${WORKDIR}/quadlets-available/${NETWORK_NAME}.network" ]; then
+            install -d ${D}${sysconfdir}/containers/systemd-available
+            install -m 0644 ${WORKDIR}/quadlets-available/${NETWORK_NAME}.network \
+                ${D}${sysconfdir}/containers/systemd-available/
+
+            bbnote "Installed disabled Quadlet network file for: ${NETWORK_NAME} (available, not active)"
+        fi
+    done
+
     # Create import marker directory
     install -d ${D}${CONTAINER_IMPORT_MARKER_DIR}
 
@@ -1337,14 +1507,16 @@ do_install:append() {
     fi
 }
 
-# Set FILES to include all container and pod artifacts
-# Using wildcards since containers/pods are determined at parse time from manifest
+# Set FILES to include all container, pod, and network artifacts
+# Using wildcards since containers/pods/networks are determined at parse time from manifest
 FILES:${PN} += "\
     ${CONTAINER_PRELOAD_DIR}/* \
     ${QUADLET_DIR}/*.container \
     ${QUADLET_DIR}/*.pod \
+    ${QUADLET_DIR}/*.network \
     ${sysconfdir}/containers/systemd-available/*.container \
     ${sysconfdir}/containers/systemd-available/*.pod \
+    ${sysconfdir}/containers/systemd-available/*.network \
     ${sysconfdir}/containers/import.d/*.sh \
     ${CONTAINER_IMPORT_MARKER_DIR} \
     ${datadir}/containers/container-digests.json \
