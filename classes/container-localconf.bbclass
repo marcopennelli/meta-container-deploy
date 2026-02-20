@@ -767,7 +767,14 @@ python do_generate_quadlets() {
         # Network mode
         network = get_container_var(d, container_name, 'NETWORK')
         if network:
-            lines.append("Network=" + network)
+            # If network matches a Quadlet-defined network, use the .network
+            # suffix so Quadlet creates proper dependency ordering and the
+            # network is guaranteed to exist before the container starts.
+            defined_networks = get_network_list(d)
+            if network in defined_networks:
+                lines.append("Network=" + network + ".network")
+            else:
+                lines.append("Network=" + network)
 
         # User
         user = get_container_var(d, container_name, 'USER')
@@ -958,7 +965,13 @@ python do_generate_pods() {
         # Network mode
         network = get_pod_var(d, pod_name, 'NETWORK')
         if network:
-            lines.append("Network=" + network)
+            # If network matches a Quadlet-defined network, use the .network
+            # suffix so Quadlet creates proper dependency ordering.
+            defined_networks = get_network_list(d)
+            if network in defined_networks:
+                lines.append("Network=" + network + ".network")
+            else:
+                lines.append("Network=" + network)
 
         # Volume mounts (shared by all containers in pod)
         volumes = get_pod_var(d, pod_name, 'VOLUMES')
