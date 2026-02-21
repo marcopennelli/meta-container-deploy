@@ -797,6 +797,7 @@ python do_generate_quadlets() {
         privileged = get_container_var(d, container_name, 'PRIVILEGED')
         if privileged == '1':
             lines.append("SecurityLabelDisable=true")
+            lines.append("PodmanArgs=--privileged")
 
         security_opts = get_container_var(d, container_name, 'SECURITY_OPTS')
         if security_opts:
