@@ -950,7 +950,13 @@ python do_generate_quadlets() {
         # Network mode
         network = container.get('network', '')
         if network:
-            lines.append("Network=" + network)
+            # If network matches a Quadlet-defined network, use the .network
+            # suffix so Quadlet creates proper dependency ordering.
+            defined_networks = get_network_list_from_manifest(d)
+            if network in defined_networks:
+                lines.append("Network=" + network + ".network")
+            else:
+                lines.append("Network=" + network)
 
         # User
         user = container.get('user', '')
@@ -975,6 +981,7 @@ python do_generate_quadlets() {
         # Security options
         if container.get('privileged'):
             lines.append("SecurityLabelDisable=true")
+            lines.append("PodmanArgs=--privileged")
 
         security_opts = container.get('security_opts', [])
         if security_opts:
@@ -1155,7 +1162,11 @@ python do_generate_pods() {
         # Network mode
         network = pod.get('network', '')
         if network:
-            lines.append("Network=" + network)
+            defined_networks = get_network_list_from_manifest(d)
+            if network in defined_networks:
+                lines.append("Network=" + network + ".network")
+            else:
+                lines.append("Network=" + network)
 
         # Volume mounts (shared by all containers in pod)
         volumes = pod.get('volumes', [])

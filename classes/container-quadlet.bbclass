@@ -210,10 +210,14 @@ python do_generate_quadlet() {
         for device in devices.split():
             lines.append("AddDevice=" + device)
 
-    # Network mode
+    # Network mode - append .network suffix for Quadlet-defined networks
     network = d.getVar('CONTAINER_NETWORK')
     if network:
-        lines.append("Network=" + network)
+        networks_list = (d.getVar('NETWORKS') or '').split()
+        if network in networks_list:
+            lines.append("Network=" + network + ".network")
+        else:
+            lines.append("Network=" + network)
 
     # User
     user = d.getVar('CONTAINER_USER')
@@ -236,6 +240,7 @@ python do_generate_quadlet() {
     privileged = d.getVar('CONTAINER_PRIVILEGED')
     if privileged == '1':
         lines.append("SecurityLabelDisable=true")
+        lines.append("PodmanArgs=--privileged")
 
     security_opts = d.getVar('CONTAINER_SECURITY_OPTS')
     if security_opts:
